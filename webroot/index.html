@@ -1,0 +1,166 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<!-- first: reports JS errors to the server log (bin/webdata-errors) -->
+<script src="/lib/report-errors.js"></script>
+<title>Reports</title>
+<meta name="description" content="Index of reports and data on this server">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-title" content="Reports">
+<meta name="apple-mobile-web-app-status-bar-style" content="default">
+<meta name="theme-color" content="#f9f9f7" media="(prefers-color-scheme: light)">
+<meta name="theme-color" content="#0d0d0d" media="(prefers-color-scheme: dark)">
+<link rel="apple-touch-icon" href="/icon-180.png">
+<link rel="manifest" href="/manifest.webmanifest">
+<link rel="stylesheet" href="/lib/kit.css">
+<!-- webdata:modules: written by webdata-sync (versioned module URLs); do not edit -->
+<script type="importmap">{"imports":{"/lib/kit.js":"/lib/kit.js?v=8e741d027c0a"}}</script>
+<link rel="modulepreload" href="/lib/kit.js?v=8e741d027c0a">
+<!-- /webdata:modules -->
+<style>
+  .reports { display: grid; gap: 12px; grid-template-columns: repeat(auto-fill, minmax(min(100%, 300px), 1fr)); }
+  .report-card {
+    display: grid; grid-template-columns: 52px 1fr; gap: 14px; align-items: start;
+    background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius);
+    padding: 14px; color: inherit; transition: border-color .15s, transform .15s;
+  }
+  .report-card:hover { text-decoration: none; border-color: var(--accent); }
+  .report-card:active { transform: scale(.99); }
+  .report-card img { width: 52px; height: 52px; border-radius: 12px; display: block; }
+  .report-card h2 { font-size: 15px; }
+  .report-card p { font-size: 13px; color: var(--ink-2); margin-top: 3px;
+    display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
+  .report-card .meta { font-size: 12px; color: var(--muted); margin-top: 6px; }
+  .tags { display: flex; flex-wrap: wrap; gap: 4px; margin-top: 6px; }
+  .tag { font-size: 11px; color: var(--ink-2); background: var(--surface-2); border-radius: 6px; padding: 1px 7px; }
+  .section-head { display: flex; align-items: baseline; justify-content: space-between; gap: 12px; margin-top: 8px; }
+  .section-head p { font-size: 13px; color: var(--muted); }
+  .toolbar { display: flex; gap: 8px; }
+  .toolbar input { flex: 1; max-width: 360px; }
+  .db header { display: flex; justify-content: space-between; gap: 12px; align-items: baseline; flex-wrap: wrap; }
+  .db .src { font-size: 13px; color: var(--muted); }
+  .db details { border-top: 1px solid var(--grid); padding: 8px 0; }
+  .db details:first-of-type { margin-top: 10px; }
+  .db summary { cursor: pointer; display: flex; justify-content: space-between; gap: 12px; font-size: 14px; list-style: none; }
+  .db summary::-webkit-details-marker { display: none; }
+  .db summary::before { content: "›"; color: var(--muted); width: 12px; transition: transform .15s; }
+  .db details[open] summary::before { transform: rotate(90deg); }
+  .db summary .name { flex: 1; font-family: var(--mono); font-size: 13px; }
+  .db summary .count { color: var(--muted); font-size: 13px; }
+  .db .cols { margin: 6px 0 2px 24px; display: grid; grid-template-columns: max-content 1fr; gap: 2px 16px; font-size: 12px; }
+  .db .cols span:nth-child(odd) { font-family: var(--mono); }
+  .db .cols span:nth-child(even) { color: var(--muted); }
+  .db .other { font-size: 12px; color: var(--muted); margin-top: 8px; }
+</style>
+</head>
+<body>
+<header class="app-header">
+  <div class="inner">
+    <div class="titles">
+      <h1>Reports</h1>
+      <div data-kit-status class="kit-status" data-state="loading">Loading…</div>
+    </div>
+  </div>
+</header>
+
+<main>
+  <div class="toolbar">
+    <input id="q" type="search" placeholder="Filter reports" aria-label="Filter reports" autocomplete="off">
+  </div>
+  <section id="reports" class="reports" aria-live="polite"></section>
+
+  <div class="section-head">
+    <h2>Data</h2>
+    <p>Snapshots refresh automatically when a bot's data changes</p>
+  </div>
+  <section id="data" class="grid"></section>
+</main>
+
+<script type="module">
+import { getJSON, watch, fmt } from '/lib/kit.js';
+
+const el = (tag, props = {}, ...children) => {
+  const node = Object.assign(document.createElement(tag), props);
+  node.append(...children.filter((c) => c != null));
+  return node;
+};
+const status = document.querySelector('[data-kit-status]');
+const q = document.getElementById('q');
+let reports = [];
+
+function renderReports() {
+  const needle = q.value.trim().toLowerCase();
+  const shown = reports.filter((r) => !needle ||
+    [r.title, r.description, ...r.tags].join(' ').toLowerCase().includes(needle));
+  const box = document.getElementById('reports');
+  if (!reports.length) {
+    box.replaceChildren(el('p', { className: 'empty wide', textContent: 'No reports yet.' }));
+    return;
+  }
+  if (!shown.length) {
+    box.replaceChildren(el('p', { className: 'empty wide', textContent: 'No reports match.' }));
+    return;
+  }
+  box.replaceChildren(...shown.map((r) => el('a', { className: 'report-card', href: r.url },
+    el('img', { src: r.icon, alt: '', loading: 'lazy' }),
+    el('div', {},
+      el('h2', { textContent: r.title }),
+      r.description ? el('p', { textContent: r.description }) : null,
+      el('div', { className: 'meta', textContent: r.data_updated
+        ? `Data updated ${fmt.ago(r.data_updated)}` : `Updated ${fmt.ago(r.updated)}` }),
+      r.tags.length ? el('div', { className: 'tags' }, ...r.tags.map((t) => el('span', { className: 'tag', textContent: t }))) : null,
+    ))));
+}
+
+function renderData(catalog) {
+  const box = document.getElementById('data');
+  if (!catalog.databases.length) {
+    box.replaceChildren(el('p', { className: 'empty wide', textContent: 'No databases yet.' }));
+    return;
+  }
+  box.replaceChildren(...catalog.databases.map((d) => {
+    const mine = d.tables.filter((t) => t.schema === 'main' || t.schema == null);
+    const other = d.tables.length - mine.length;
+    const src = d.source.type === 'openmausbot' ? `${d.source.bot} (OpenMausBot)` : 'file';
+    return el('article', { className: 'card db' },
+      el('header', {},
+        el('h2', {}, el('a', { href: d.url, textContent: `${d.name}.${d.format}` })),
+        el('span', { className: 'src', textContent: `${src} · ${fmt.compact(d.bytes)}B · ${fmt.ago(d.updated)}` })),
+      ...mine.map((t) => el('details', {},
+        el('summary', {},
+          el('span', { className: 'name', textContent: t.name }),
+          el('span', { className: 'count', textContent: t.rows != null
+            ? `${fmt.num(t.rows)} rows · ${t.columns.length} cols` : `view · ${t.columns.length} cols` })),
+        el('div', { className: 'cols' }, ...t.columns.flatMap((c) => [
+          el('span', { textContent: c.name }), el('span', { textContent: c.type })])))),
+      other ? el('p', { className: 'other', textContent: `+ ${other} table${other > 1 ? 's' : ''} in other schemas (e.g. omb_results: the bot's cached card results)` }) : null,
+    );
+  }));
+}
+
+async function load() {
+  try {
+    const [idx, catalog] = await Promise.all([getJSON('/reports/index.json'), getJSON('/data/catalog.json')]);
+    reports = idx.reports;
+    renderReports();
+    renderData(catalog);
+    const latest = catalog.databases.map((d) => d.updated).sort().pop();
+    status.dataset.state = 'ok';
+    status.textContent = `${reports.length} report${reports.length === 1 ? '' : 's'}` +
+      (latest ? ` · data updated ${fmt.ago(latest)}` : '');
+  } catch (err) {
+    status.dataset.state = 'error';
+    status.textContent = 'Could not load the index';
+    console.error(err);
+  }
+}
+
+q.addEventListener('input', renderReports);
+await load();
+watch(['/reports/index.json', '/data/catalog.json'], load);
+</script>
+</body>
+</html>

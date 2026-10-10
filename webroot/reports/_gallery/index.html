@@ -1,0 +1,446 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<!-- first: reports JS errors to the server log (bin/webdata-errors) -->
+<script src="/lib/report-errors.js"></script>
+<title>Design gallery</title>
+<meta name="theme-color" content="#f9f9f7" media="(prefers-color-scheme: light)">
+<meta name="theme-color" content="#0d0d0d" media="(prefers-color-scheme: dark)">
+<link rel="stylesheet" href="/lib/kit.css">
+<link rel="preconnect" href="https://cdn.jsdelivr.net" crossorigin>
+<!-- webdata:modules: written by webdata-sync (versioned module URLs); do not edit -->
+<script type="importmap">{"imports":{"/lib/kit.js":"/lib/kit.js?v=8e741d027c0a"}}</script>
+<link rel="modulepreload" href="/lib/kit.js?v=8e741d027c0a">
+<!-- /webdata:modules -->
+<script defer src="/lib/vendor/d3.min.js"></script>
+<script defer src="/lib/vendor/plot.umd.min.js"></script>
+<!--
+  The living reference for ~/webdata/DESIGN.md. Every component and chart
+  form, rendered with the real kit, on synthetic data generated in SQL (no
+  bot database needed). Each section is one function below: copy from here.
+  Not listed on the front page (directory starts with "_").
+-->
+<style>
+  .swatches { display: grid; grid-template-columns: repeat(auto-fill, minmax(132px, 1fr)); gap: 10px; }
+  .swatch { display: flex; align-items: center; gap: 8px; font-size: 12px; min-width: 0; }
+  .swatch i { width: 28px; height: 28px; border-radius: 7px; flex: none; border: 1px solid var(--border); }
+  .swatch code { font-family: var(--mono); font-size: 11px; color: var(--ink-2); overflow: hidden; text-overflow: ellipsis; }
+  .type-scale > * + * { margin-top: 8px; }
+  .section-title { margin-top: 12px; }
+  .section-title p { font-size: 13px; color: var(--muted); margin-top: 2px; }
+</style>
+</head>
+<body>
+<header class="app-header">
+  <div class="inner">
+    <a class="back" href="/" aria-label="All reports">‹</a>
+    <div class="titles">
+      <h1>Design gallery</h1>
+      <div data-kit-status></div>
+    </div>
+  </div>
+</header>
+
+<main>
+  <!-- ======================================================= stat tiles -->
+  <div class="section-title"><h2>Headline numbers</h2><p>Stat tiles · stats()</p></div>
+  <section class="grid stats" id="stats" aria-label="Headline numbers"></section>
+
+  <!-- ======================================================= filter row -->
+  <div class="section-title"><h2>Charts</h2><p>One filter row above everything it scopes</p></div>
+  <div class="filters">
+    <div class="segmented" role="group" aria-label="Period" id="period">
+      <button data-value="30">30 days</button>
+      <button data-value="90" aria-pressed="true">90 days</button>
+    </div>
+  </div>
+
+  <section class="grid">
+    <article class="card" id="trend-card">
+      <header><h2>Daily visits</h2><p>Line over time</p></header>
+      <div id="trend"></div>
+    </article>
+    <article class="card">
+      <header><h2>Visits by region</h2><p>2–4 lines · legend + end labels</p></header>
+      <div id="compare-legend"></div>
+      <div id="compare"></div>
+    </article>
+    <article class="card">
+      <header><h2>Top pages</h2><p>Ranking · horizontal bars</p></header>
+      <div id="ranking"></div>
+    </article>
+    <article class="card">
+      <header><h2>Signups per month</h2><p>Columns · label the extreme</p></header>
+      <div id="columns"></div>
+    </article>
+    <article class="card">
+      <header><h2>Signups by channel</h2><p>Stacked columns · part of a whole</p></header>
+      <div id="stacked-legend"></div>
+      <div id="stacked"></div>
+    </article>
+    <article class="card">
+      <header><h2>Versus target</h2><p>Diverging bars · above / below zero</p></header>
+      <div id="diverging"></div>
+    </article>
+    <article class="card">
+      <header><h2>Visits by weekday</h2><p>Heatmap · sequential color</p></header>
+      <div id="heatmap"></div>
+    </article>
+    <article class="card">
+      <header><h2>Time on page vs. bounce</h2><p>Scatter · label a few</p></header>
+      <div id="scatter"></div>
+    </article>
+    <article class="card wide">
+      <header><h2>Visits per region</h2><p>Small multiples · shared y scale</p></header>
+      <div id="multiples"></div>
+    </article>
+  </section>
+
+  <!-- ======================================================= tables + tabs -->
+  <article class="card">
+    <header>
+      <div class="segmented" role="group" aria-label="Table" id="table-tabs">
+        <button data-value="tab-regions" aria-pressed="true">Regions</button>
+        <button data-value="tab-pages">Pages</button>
+      </div>
+      <p>Tap a column to sort</p>
+    </header>
+    <div id="tab-regions"></div>
+    <div id="tab-pages" hidden></div>
+  </article>
+
+  <!-- ======================================================= states -->
+  <section class="grid">
+    <article class="card">
+      <header><h2>Empty state</h2><p>empty()</p></header>
+      <div id="empty"></div>
+    </article>
+    <article class="card">
+      <header><h2>Type scale</h2><p>System sans throughout</p></header>
+      <div class="type-scale">
+        <h1>h1 · 22px · page title</h1>
+        <h2>h2 · 16px · card title</h2>
+        <h3>h3 · 14px · sub-heading</h3>
+        <p>Body · 15px (14px on phones)</p>
+        <p class="secondary">.secondary · supporting text</p>
+        <p class="muted">.muted · notes, axis labels, timestamps</p>
+        <p class="num">.num · 1,234.56 tabular figures for columns</p>
+      </div>
+    </article>
+  </section>
+
+  <!-- ======================================================= tokens -->
+  <article class="card">
+    <header><h2>Color tokens</h2><p>Live from kit.css (switch dark mode to compare)</p></header>
+    <div class="swatches" id="swatches"></div>
+  </article>
+</main>
+
+<script type="module">
+import { report, chart, legend, table, stats, segmented, empty, colors, fmt } from '/lib/kit.js';
+
+const $ = (id) => document.getElementById(id);
+const REGIONS = ['North', 'South', 'West'];   // fixed order = fixed colors
+const CHANNELS = ['Search', 'Social', 'Email'];
+
+// ---------------------------------------------------------------- data (synthetic, deterministic)
+
+const SQL = {
+  days: (n) => `
+    WITH d AS (SELECT (DATE '2026-07-04' + INTERVAL (i) DAY)::DATE AS day, i FROM range(0, 98) t(i))
+    SELECT day, round(120 + 25*sin(i/6.0) + i*0.8 + (i*37 % 17), 0)::DOUBLE AS visits
+    FROM d WHERE i >= 98 - ${n} ORDER BY day`,
+  regions: (n) => `
+    SELECT s.name AS region, (DATE '2026-07-04' + INTERVAL (i) DAY)::DATE AS day,
+           round(s.base + s.slope*i + 12*sin(i/5.0 + s.phase) + (i*13 % 9), 1)::DOUBLE AS value
+    FROM range(98 - ${n}, 98) t(i),
+         (VALUES ('North', 60, 0.5, 0), ('South', 90, 0.1, 2), ('West', 40, 0.9, 4)) s(name, base, slope, phase)
+    ORDER BY region, day`,
+  pages: `
+    SELECT * FROM (VALUES ('/pricing', 4210, 61.0, 0.31), ('/docs/start', 3890, 142.0, 0.22),
+      ('/blog/launch', 3120, 95.0, 0.48), ('/features', 2760, 54.0, 0.39), ('/about', 1480, 33.0, 0.57),
+      ('/careers', 1210, 71.0, 0.44), ('/changelog', 980, 88.0, 0.27), ('/status', 640, 12.0, 0.71))
+      t(page, views, seconds, bounce)
+    ORDER BY views DESC`,
+  months: `
+    SELECT strftime(m, '%b') AS month, month(m) AS n, c.name AS channel,
+           (40 + c.k * (month(m) * 7 % 11) + c.base)::DOUBLE AS signups
+    FROM range(DATE '2026-01-01', DATE '2026-10-01', INTERVAL 1 MONTH) t(m),
+         (VALUES ('Search', 3, 30), ('Social', 2, 10), ('Email', 1, 0)) c(name, k, base)
+    ORDER BY n, channel`,
+};
+
+// ---------------------------------------------------------------- recipes (one function each)
+
+function headline(el, days) {
+  const total = days.reduce((s, d) => s + d.visits, 0);
+  const half = Math.floor(days.length / 2);
+  const recent = days.slice(half).reduce((s, d) => s + d.visits, 0);
+  const prior = days.slice(0, half).reduce((s, d) => s + d.visits, 0);
+  const change = (recent - prior) / prior;
+  stats(el, [
+    { label: 'Visits', value: fmt.compact(total), note: `${days.length} days` },
+    { label: 'Daily average', value: fmt.num(total / days.length, 0),
+      delta: { text: `${fmt.pct(Math.abs(change))} vs first half`, direction: change >= 0 ? 'up' : 'down', good: change >= 0 } },
+    { label: 'Bounce rate', value: '38.2%',
+      delta: { text: '2.1 pts vs last month', direction: 'up', good: false } },       // up is bad here
+    { label: 'Uptime', value: '99.98%', delta: { text: 'no change', direction: 'flat', good: null } },
+  ]);
+}
+
+/** Line over time: crosshair snaps to the nearest day, value at the line end. */
+function trend(el, rows, c) {
+  const last = rows.at(-1);
+  chart(el, {
+    height: 220, marginLeft: 40, marginRight: 36,
+    y: { grid: true, ticks: 4, label: null, tickFormat: fmt.compact },
+    x: { ticks: 4, label: null },
+    marks: [
+      Plot.ruleY([0], { stroke: c.axis }),
+      Plot.lineY(rows, { x: 'day', y: 'visits', stroke: c.series[0], strokeWidth: 2 }),
+      Plot.text([last], { x: 'day', y: 'visits', text: (d) => fmt.num(d.visits, 0), dx: 6, textAnchor: 'start', fill: c.ink2 }),
+      Plot.ruleX(rows, Plot.pointerX({ x: 'day', stroke: c.axis })),
+      Plot.dot(rows, Plot.pointerX({ x: 'day', y: 'visits', r: 4, fill: c.series[0], stroke: c.surface, strokeWidth: 2 })),
+      Plot.tip(rows, Plot.pointerX({ x: 'day', y: 'visits',
+        format: { x: (d) => fmt.date(d), y: (v) => `${fmt.num(v, 0)} visits` } })),
+    ],
+  });
+}
+
+/** 2–4 series: legend above, end labels, one tooltip listing every series. */
+function compare(el, legendEl, rows, c) {
+  const color = (r) => c.series[REGIONS.indexOf(r)];
+  legend(legendEl, REGIONS.map((r) => ({ label: r, color: color(r), line: true })));
+  const byDay = d3.rollups(rows, (v) => Object.fromEntries(v.map((d) => [d.region, d.value])), (d) => +d.day)
+    .map(([t, vals]) => ({ day: new Date(t), ...vals }));
+  // End labels only where they don't collide (within ~8% of the y range);
+  // the legend and tooltip carry identity for the rest. Never nudge them apart.
+  const span = d3.max(rows, (d) => d.value) - d3.min(rows, (d) => d.value);
+  const lastOf = REGIONS.map((r) => rows.filter((d) => d.region === r).at(-1));
+  const ends = lastOf.filter((a) => lastOf.every((b) => a === b || Math.abs(a.value - b.value) > span * 0.08));
+  chart(el, {
+    height: 220, marginLeft: 36, marginRight: 52,
+    y: { grid: true, ticks: 4, label: null },
+    x: { ticks: 4, label: null },
+    color: { domain: REGIONS },
+    marks: [
+      Plot.lineY(rows, { x: 'day', y: 'value', stroke: 'region', strokeWidth: 2 }),
+      Plot.text(ends, { x: 'day', y: 'value', text: 'region', dx: 6, textAnchor: 'start', fill: c.ink2 }),
+      Plot.ruleX(byDay, Plot.pointerX({ x: 'day', stroke: c.axis })),
+      Plot.tip(byDay, Plot.pointerX({ x: 'day', y: (d) => Math.max(...REGIONS.map((r) => d[r])),
+        channels: Object.fromEntries(REGIONS.map((r) => [r, r])),
+        format: { x: (d) => fmt.date(d), y: false } })),
+    ],
+  });
+}
+
+/** Ranking: horizontal bars, sorted, value at the tip, no x axis needed. */
+function ranking(el, rows, c) {
+  chart(el, {
+    height: rows.length * 28 + 8,
+    marginLeft: 96, marginRight: 44, marginTop: 4, marginBottom: 4,
+    x: { axis: null },
+    y: { label: null, domain: rows.map((d) => d.page), tickSize: 0 },
+    marks: [
+      Plot.barX(rows, { x: 'views', y: 'page', fill: c.series[0], rx2: 4, insetTop: 4, insetBottom: 4,
+        tip: { format: { y: true, x: (v) => `${fmt.num(v)} views` } } }),
+      Plot.text(rows, { x: 'views', y: 'page', text: (d) => fmt.compact(d.views), dx: 6, textAnchor: 'start', fill: c.ink2 }),
+      Plot.ruleX([0], { stroke: c.axis }),
+    ],
+  });
+}
+
+/** Columns: one series, bars ≤ 24px, rounded cap, label only the extreme. */
+function columns(el, rows, c) {
+  const totals = d3.rollups(rows, (v) => d3.sum(v, (d) => d.signups), (d) => d.month)
+    .map(([month, signups]) => ({ month, signups }));
+  const peak = totals.reduce((a, b) => (b.signups > a.signups ? b : a));
+  chart(el, {
+    height: 220, marginLeft: 36,
+    x: { label: null, domain: totals.map((d) => d.month), padding: 0.35, tickSize: 0 },
+    y: { grid: true, ticks: 4, label: null },
+    marks: [
+      Plot.barY(totals, { x: 'month', y: 'signups', fill: c.series[0], ry1: 4,
+        tip: { format: { x: true, y: (v) => `${fmt.num(v)} signups` } } }),
+      Plot.text([peak], { x: 'month', y: 'signups', text: (d) => fmt.num(d.signups), dy: -8, fill: c.ink2 }),
+      Plot.ruleY([0], { stroke: c.axis }),
+    ],
+  });
+}
+
+/** Stacked columns: ≤ 4 parts, fixed order + colors, surface gap between segments. */
+function stacked(el, legendEl, rows, c) {
+  legend(legendEl, CHANNELS.map((ch, i) => ({ label: ch, color: c.series[i] })));
+  chart(el, {
+    height: 220, marginLeft: 36,
+    x: { label: null, domain: [...new Set(rows.map((d) => d.month))], padding: 0.35, tickSize: 0 },
+    y: { grid: true, ticks: 4, label: null },
+    color: { domain: CHANNELS },
+    marks: [
+      Plot.barY(rows, Plot.stackY({ order: CHANNELS }, { x: 'month', y: 'signups', fill: 'channel',
+        stroke: c.surface, strokeWidth: 1, tip: { format: { x: true, fill: true, y: (v) => fmt.num(v) } } })),
+      Plot.ruleY([0], { stroke: c.axis }),
+    ],
+  });
+}
+
+/** Diverging: blue above zero, red below, rounded at the data end, label extremes. */
+function diverging(el, rows, c) {
+  const months = [...new Set(rows.map((d) => d.month))];
+  const vs = months.map((month) => {
+    const v = d3.sum(rows.filter((d) => d.month === month), (d) => d.signups);
+    return { month, delta: v - 200 };   // vs a target of 200 signups
+  });
+  const hi = vs.reduce((a, b) => (b.delta > a.delta ? b : a));
+  const lo = vs.reduce((a, b) => (b.delta < a.delta ? b : a));
+  chart(el, {
+    height: 240, marginLeft: 36,
+    x: { label: null, domain: months, padding: 0.35, tickSize: 0 },
+    // insets leave room for the extreme labels above/below the bars
+    y: { grid: true, ticks: 4, label: null, insetTop: 18, insetBottom: 18, tickFormat: (v) => (v > 0 ? `+${v}` : v) },
+    marks: [
+      Plot.barY(vs.filter((d) => d.delta >= 0), { x: 'month', y: 'delta', fill: c.divPos, ry1: 4 }),
+      Plot.barY(vs.filter((d) => d.delta < 0), { x: 'month', y: 'delta', fill: c.divNeg, ry2: 4 }),
+      Plot.ruleY([0], { stroke: c.ink2 }),
+      Plot.text([hi], { x: 'month', y: 'delta', text: (d) => `+${d.delta}`, dy: -8, fill: c.ink2 }),
+      Plot.text([lo], { x: 'month', y: 'delta', text: (d) => `${d.delta}`, dy: 10, fill: c.ink2 }),
+      Plot.tip(vs, Plot.pointerX({ x: 'month', y: 'delta', format: { x: true, y: (v) => `${v > 0 ? '+' : ''}${v} vs target` } })),
+    ],
+  });
+}
+
+/** Heatmap: one hue light → dark (dark mode flips the ramp), with a scale legend. */
+function heatmap(el, rows, c) {
+  const DOW = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'];
+  const cells = rows.map((d) => ({ week: d3.timeMonday.floor(d.day), dow: DOW[(d.day.getDay() + 6) % 7], visits: d.visits }));
+  chart(el, {
+    height: 230, marginLeft: 36, marginBottom: 28,
+    padding: 0,
+    x: { type: 'band', label: null, tickFormat: (d) => d3.timeFormat('%b %-d')(d), ticks: 4, tickSize: 0,
+         domain: [...new Set(cells.map((d) => +d.week))].map((t) => new Date(t)),
+         interval: d3.timeMonday },
+    y: { label: null, domain: DOW, tickSize: 0 },
+    color: { type: 'linear', range: [c.seqLow, c.seqHigh], legend: true, label: 'Visits', ticks: 4 },
+    marks: [
+      Plot.cell(cells, { x: 'week', y: 'dow', fill: 'visits', inset: 1, rx: 3,
+        tip: { format: { x: (d) => `Week of ${fmt.date(d)}`, y: true, fill: (v) => fmt.num(v, 0) } } }),
+    ],
+  });
+}
+
+/** Scatter: one series, ringed dots, a few direct labels, nearest-point tooltip. */
+function scatter(el, rows, c) {
+  const top = [...rows].sort((a, b) => b.views - a.views).slice(0, 2);
+  chart(el, {
+    height: 250, marginLeft: 40, marginBottom: 40, inset: 12,
+    grid: true,
+    x: { label: 'Seconds on page', ticks: 4 },
+    y: { label: 'Bounce rate', tickFormat: (v) => fmt.pct(v, 0), ticks: 4 },
+    marks: [
+      Plot.dot(rows, { x: 'seconds', y: 'bounce', r: 5, fill: c.series[0], stroke: c.surface, strokeWidth: 2,
+        channels: { Page: 'page', Views: 'views' },
+        tip: { format: { Page: true, Views: (v) => fmt.num(v), x: (v) => `${v}s`, y: (v) => fmt.pct(v, 0) } } }),
+      // Labels sit beside their dot (never between dots), on the side away from the edge.
+      Plot.text(top, { x: 'seconds', y: 'bounce', text: 'page', fill: c.ink2,
+        textAnchor: 'start', dx: 9, filter: (d) => d.seconds < d3.median(rows, (r) => r.seconds) }),
+      Plot.text(top, { x: 'seconds', y: 'bounce', text: 'page', fill: c.ink2,
+        textAnchor: 'end', dx: -9, filter: (d) => d.seconds >= d3.median(rows, (r) => r.seconds) }),
+    ],
+  });
+}
+
+/** Small multiples: one small chart per entity, same scales, one color, area wash. */
+function multiples(el, rows, c) {
+  chart(el, {
+    height: REGIONS.length * 92 + 24, marginLeft: 36, marginRight: 8,
+    fy: { label: null, domain: REGIONS, padding: 0.3, axis: null },   // labelled inside each panel
+    y: { grid: true, ticks: 2, label: null },
+    x: { ticks: 5, label: null },
+    marks: [
+      Plot.frame({ anchor: 'bottom', stroke: c.axis }),
+      Plot.text(REGIONS, { fy: (d) => d, text: (d) => d, frameAnchor: 'top-left', dx: 4, dy: -6, fill: c.ink2, fontWeight: 600 }),
+      Plot.areaY(rows, { x: 'day', y: 'value', fy: 'region', fill: c.series[0], fillOpacity: 0.1 }),
+      Plot.lineY(rows, { x: 'day', y: 'value', fy: 'region', stroke: c.series[0], strokeWidth: 2,
+        tip: { format: { x: (d) => fmt.date(d), y: true, fy: true } } }),
+    ],
+  });
+}
+
+function tables(rows, pages) {
+  const summary = REGIONS.map((region) => {
+    const v = rows.filter((d) => d.region === region).map((d) => d.value);
+    return { region, average: d3.mean(v), peak: d3.max(v), latest: v.at(-1), change: (v.at(-1) - v[0]) / v[0] };
+  });
+  table($('tab-regions'), summary, [
+    { key: 'region', label: 'Region' },
+    { key: 'average', label: 'Average', format: (v) => fmt.num(v, 1) },
+    { key: 'peak', label: 'Peak', format: (v) => fmt.num(v, 1) },
+    { key: 'latest', label: 'Latest', format: (v) => fmt.num(v, 1) },
+    { key: 'change', label: 'Change', format: (v) => `${v >= 0 ? '+' : '−'}${fmt.pct(Math.abs(v))}` },
+  ], { sort: 'average' });
+  table($('tab-pages'), pages, [
+    { key: 'page', label: 'Page' },
+    { key: 'views', label: 'Views', format: (v) => fmt.num(v) },
+    { key: 'seconds', label: 'Time (s)', format: (v) => fmt.num(v, 0) },
+    { key: 'bounce', label: 'Bounce', format: (v) => fmt.pct(v) },
+  ], { sort: 'views' });
+}
+
+function swatches(el) {
+  const groups = [
+    ['Surfaces & ink', ['--page', '--surface', '--surface-2', '--ink', '--ink-2', '--muted', '--grid', '--axis', '--accent']],
+    ['Series (in order)', [1, 2, 3, 4, 5, 6, 7, 8].map((i) => `--series-${i}`)],
+    ['Status', ['--status-good', '--status-warning', '--status-serious', '--status-critical', '--good-text', '--bad-text']],
+    ['Scales', ['--seq-low', '--seq-high', '--div-neg', '--div-mid', '--div-pos']],
+  ];
+  const s = getComputedStyle(document.documentElement);
+  el.replaceChildren(...groups.flatMap(([title, names]) => {
+    const h = document.createElement('h3');
+    h.textContent = title;
+    h.style.gridColumn = '1 / -1';
+    return [h, ...names.map((n) => {
+      const row = document.createElement('div');
+      row.className = 'swatch';
+      const sw = document.createElement('i');
+      sw.style.background = `var(${n})`;
+      const code = document.createElement('code');
+      code.textContent = `${n} ${s.getPropertyValue(n).trim()}`;
+      row.append(sw, code);
+      return row;
+    })];
+  }));
+}
+
+// ---------------------------------------------------------------- the report
+
+const period = segmented($('period'), { onChange: () => app.redraw() });
+segmented($('table-tabs'));
+
+const app = report({
+  databases: [],                       // gallery data is generated in SQL
+  async render(db) {
+    const c = colors();
+    const n = Number(period.value);
+    const [days, regions, pages, months] = await Promise.all([
+      db.query(SQL.days(n)), db.query(SQL.regions(n)), db.query(SQL.pages), db.query(SQL.months),
+    ]);
+    headline($('stats'), days);
+    trend($('trend'), days, c);
+    compare($('compare'), $('compare-legend'), regions, c);
+    ranking($('ranking'), pages, c);
+    columns($('columns'), months, c);
+    stacked($('stacked'), $('stacked-legend'), months, c);
+    diverging($('diverging'), months, c);
+    heatmap($('heatmap'), days, c);
+    scatter($('scatter'), pages, c);
+    multiples($('multiples'), regions, c);
+    tables(regions, pages);
+    empty($('empty'), 'No games scheduled this week.');
+    swatches($('swatches'));
+  },
+});
+</script>
+</body>
+</html>

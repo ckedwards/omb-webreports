@@ -1,0 +1,652 @@
+#!/usr/bin/env node
+// webdata-job: scheduled scripts that refresh bots' DuckDB tables.
+//
+// A job is ROOT/jobs/<name>/ with:
+//   job.json   bot, cron schedule + timezone, tables to write, enabled flag
+//   run.py | run.mjs | run.sh | run   the script (any one; or "command" in job.json)
+//   .env       optional KEY=value secrets for the script (chmod 600)
+//
+// The script only collects: it writes one file per declared table into
+// $WEBDATA_OUT (<table>.json | .ndjson | .csv | .parquet) and exits 0. This
+// runner then validates every table and applies them to the bot's database in
+// one short transaction, waiting while OpenMausBot holds the file (it keeps a
+// bot's database open for 10 minutes after use; DuckDB allows one writer).
+// A failed script, a missing table or a failed check writes nothing.
+//
+//   webdata-job list                       jobs, schedule, last/next run
+//   webdata-job new <name> --bot <bot> --table <t>[:mode[:key,key]] ...
+//                   --schedule "<cron>" [--tz <IANA>] [--description "..."]
+//   webdata-job run <name> [--dry-run]     run now (dry run: collect + validate only)
+//   webdata-job logs <name> [--all]        last run's log (or list of runs)
+//   webdata-job enable|disable <name>
+//   webdata-job show <name>                job.json, validation, next 5 runs
+//   webdata-job notify-test <bot>          send a test event to the bot's webhook
+//   webdata-job daemon                     the scheduler (webdata-jobs.service)
+//
+// Failure notifications: jobs/.notify.env (chmod 600) maps a bot to an
+// OpenMausBot webhook URL, one per line: MyBot=http://127.0.0.1:8800/hooks/wh_.../whsec_...
+// When a scheduled run fails, the runner POSTs the job, error and log tail
+// there, so the bot can start a task to fix it: on the first failure, then at
+// most once a day while it keeps failing.
+//
+// Table modes: replace (default; whole table each run), append (add rows),
+// upsert (replace rows with the same key, add new ones; needs a key).
+
+import { spawn } from 'node:child_process';
+import fs from 'node:fs';
+import { createRequire } from 'node:module';
+import os from 'node:os';
+import path from 'node:path';
+import { fileURLToPath, pathToFileURL } from 'node:url';
+
+import { ROOT, OMB_DATA_DIR, NODE_MODULES_DIR } from './_config.mjs';
+// Overridable so tests never share a folder with the live webdata-jobs service.
+const JOBS = process.env.WEBDATA_JOBS_DIR || path.join(ROOT, 'jobs');
+const STATE = process.env.WEBDATA_JOBS_STATE || path.join(ROOT, '.state', 'jobs');
+const CATALOG = path.join(ROOT, 'webroot', 'data', 'catalog.json');
+const OMB = OMB_DATA_DIR;
+// The exact binding OpenMausBot uses, so the file format never drifts.
+const DUCKDB = path.join(NODE_MODULES_DIR, '@duckdb', 'node-api', 'lib', 'index.js');
+
+const NAME = /^[a-z0-9][a-z0-9-]{0,62}$/;
+const TABLE = /^[a-z_][a-z0-9_]{0,62}$/;
+const MODES = new Set(['replace', 'append', 'upsert']);
+const FORMATS = ['parquet', 'ndjson', 'jsonl', 'json', 'csv'];
+const KEEP_LOGS = 30;
+const NOTIFY_FILE = path.join(JOBS, '.notify.env');
+const RENOTIFY_MS = 24 * 3600_000;
+const LOCK_RETRY_MS = 15_000;
+
+const readJSON = (f, fallback) => { try { return JSON.parse(fs.readFileSync(f, 'utf8')); } catch { return fallback; } };
+const writeJSON = (f, v) => { const t = `${f}.tmp-${process.pid}`; fs.writeFileSync(t, JSON.stringify(v, null, 2) + '\n'); fs.renameSync(t, f); };
+const q = (s) => `"${String(s).replace(/"/g, '""')}"`;
+const lit = (s) => `'${String(s).replace(/'/g, "''")}'`;
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+const stamp = () => new Date().toISOString();
+const ago = (iso) => {
+  if (!iso) return 'never';
+  const m = Math.round((Date.now() - Date.parse(iso)) / 60000);
+  return m < 1 ? 'just now' : m < 60 ? `${m}m ago` : m < 2880 ? `${Math.round(m / 60)}h ago` : `${Math.round(m / 1440)}d ago`;
+};
+
+// ---------------------------------------------------------------- cron
+
+const ALIASES = { '@hourly': '0 * * * *', '@daily': '0 0 * * *', '@midnight': '0 0 * * *', '@weekly': '0 0 * * 0', '@monthly': '0 0 1 * *', '@yearly': '0 0 1 1 *' };
+const NAMES = {
+  month: ['jan', 'feb', 'mar', 'apr', 'may', 'jun', 'jul', 'aug', 'sep', 'oct', 'nov', 'dec'],
+  dow: ['sun', 'mon', 'tue', 'wed', 'thu', 'fri', 'sat'],
+};
+
+function parseField(text, min, max, names) {
+  const set = new Set();
+  for (const part of text.toLowerCase().split(',')) {
+    const m = part.match(/^(\*|[a-z0-9]+(?:-[a-z0-9]+)?)(?:\/(\d+))?$/);
+    if (!m) throw new Error(`bad cron field "${text}"`);
+    const val = (v) => {
+      const i = names ? names.indexOf(v) : -1;
+      const n = i >= 0 ? i + (min === 1 ? 1 : 0) : Number(v);
+      if (!Number.isInteger(n) || n < min || n > max) throw new Error(`"${v}" out of range in "${text}"`);
+      return n;
+    };
+    let [lo, hi] = m[1] === '*' ? [min, max] : m[1].split('-').map(val);
+    if (hi == null) hi = m[2] ? max : lo;
+    const step = m[2] ? Number(m[2]) : 1;
+    if (step < 1 || lo > hi) throw new Error(`bad range in "${text}"`);
+    for (let v = lo; v <= hi; v += step) set.add(v);
+  }
+  return set;
+}
+
+function parseCron(expr) {
+  const fields = (ALIASES[expr.trim()] || expr).trim().split(/\s+/);
+  if (fields.length !== 5) throw new Error(`cron needs 5 fields (minute hour day month weekday), got "${expr}"`);
+  const dow = parseField(fields[4], 0, 7, NAMES.dow);
+  if (dow.has(7)) dow.add(0);
+  return {
+    minute: parseField(fields[0], 0, 59), hour: parseField(fields[1], 0, 23),
+    dom: parseField(fields[2], 1, 31), month: parseField(fields[3], 1, 12, NAMES.month), dow,
+    domAny: fields[2] === '*', dowAny: fields[4] === '*',
+  };
+}
+
+const formatters = new Map();
+function partsIn(date, tz) {
+  let f = formatters.get(tz);
+  if (!f) {
+    f = new Intl.DateTimeFormat('en-US', { timeZone: tz, hourCycle: 'h23', year: 'numeric', month: 'numeric',
+      day: 'numeric', hour: 'numeric', minute: 'numeric', weekday: 'short' });
+    formatters.set(tz, f);
+  }
+  const p = Object.fromEntries(f.formatToParts(date).map((x) => [x.type, x.value]));
+  return { minute: +p.minute, hour: +p.hour, dom: +p.day, month: +p.month, dow: NAMES.dow.indexOf(p.weekday.toLowerCase().slice(0, 3)) };
+}
+
+function cronMatches(cron, date, tz) {
+  const p = partsIn(date, tz);
+  if (!cron.minute.has(p.minute) || !cron.hour.has(p.hour) || !cron.month.has(p.month)) return false;
+  // Vixie cron: when both day fields are restricted, either may match.
+  if (!cron.domAny && !cron.dowAny) return cron.dom.has(p.dom) || cron.dow.has(p.dow);
+  return cron.dom.has(p.dom) && cron.dow.has(p.dow);
+}
+
+function nextRuns(cron, tz, count = 1, from = new Date()) {
+  const out = [];
+  const t = new Date(Math.floor(from.getTime() / 60000) * 60000 + 60000);
+  for (let i = 0; i < 60 * 24 * 400 && out.length < count; i++, t.setTime(t.getTime() + 60000)) {
+    if (cronMatches(cron, t, tz)) out.push(new Date(t));
+  }
+  return out;
+}
+
+const fmtTime = (d, tz) => d.toLocaleString('en-CA', { timeZone: tz, dateStyle: 'short', timeStyle: 'short', hourCycle: 'h23' }) + ` ${tz}`;
+
+// ---------------------------------------------------------------- jobs
+
+function listBots() {
+  const bots = readJSON(path.join(OMB, 'bots.json'), []);
+  return (Array.isArray(bots) ? bots : Object.values(bots)).filter((b) => b?.id);
+}
+
+function resolveBot(nameOrId) {
+  const want = String(nameOrId ?? '').toLowerCase();
+  const bot = listBots().find((b) => b.id === nameOrId || String(b.name).toLowerCase() === want);
+  if (!bot) throw new Error(`no bot "${nameOrId}" (bots: ${listBots().map((b) => b.name).join(', ')})`);
+  const snapshot = (readJSON(CATALOG, { databases: [] }).databases || []).find((d) => d.source?.id === bot.id);
+  return {
+    id: bot.id, name: bot.name,
+    db: path.join(OMB, 'bots', bot.id, 'data.duckdb'),
+    snapshot: snapshot ? path.join(ROOT, 'webroot', snapshot.url) : null,
+    snapshotName: snapshot?.name ?? null,
+  };
+}
+
+/** Load and validate one job. Throws with every problem listed. */
+function loadJob(name) {
+  if (!NAME.test(name)) throw new Error(`job name "${name}" must be lowercase-kebab-case`);
+  const dir = path.join(JOBS, name);
+  const file = path.join(dir, 'job.json');
+  if (!fs.existsSync(file)) throw new Error(`no ${path.relative(ROOT, file)}`);
+  let raw;
+  try { raw = JSON.parse(fs.readFileSync(file, 'utf8')); } catch (e) { throw new Error(`jobs/${name}/job.json: ${e.message}`); }
+  const problems = [];
+  const job = {
+    name, dir,
+    description: String(raw.description || ''),
+    schedule: String(raw.schedule || ''),
+    timezone: String(raw.timezone || 'UTC'),
+    enabled: raw.enabled === true,
+    timeoutMinutes: Number(raw.timeout_minutes ?? 10),
+    lockWaitMinutes: Number(raw.lock_wait_minutes ?? 20),
+    command: raw.command ? String(raw.command) : null,
+    tables: {},
+  };
+  try { job.cron = parseCron(job.schedule); } catch (e) { problems.push(`schedule: ${e.message}`); }
+  try { new Intl.DateTimeFormat('en-US', { timeZone: job.timezone }); } catch { problems.push(`timezone "${job.timezone}" is not an IANA zone (e.g. America/Toronto)`); }
+  try { job.bot = resolveBot(raw.bot); } catch (e) { problems.push(`bot: ${e.message}`); }
+  if (!(job.timeoutMinutes > 0 && job.timeoutMinutes <= 120)) problems.push('timeout_minutes must be 1–120');
+  if (!raw.tables || typeof raw.tables !== 'object' || !Object.keys(raw.tables).length) problems.push('tables: declare at least one table');
+  for (const [t, spec] of Object.entries(raw.tables || {})) {
+    const s = { mode: 'replace', key: [], min_rows: 1, allow_schema_change: false, ...(spec || {}) };
+    if (!TABLE.test(t)) problems.push(`table "${t}": use lowercase letters, digits, _`);
+    if (!MODES.has(s.mode)) problems.push(`table "${t}": mode must be replace, append or upsert`);
+    if (s.mode === 'upsert' && !(Array.isArray(s.key) && s.key.length)) problems.push(`table "${t}": upsert needs "key": ["column", ...]`);
+    job.tables[t] = s;
+  }
+  job.script = job.command ? null : ['run.py', 'run.mjs', 'run.js', 'run.sh', 'run'].find((f) => fs.existsSync(path.join(dir, f)));
+  if (!job.command && !job.script) problems.push('no script: add run.py, run.mjs, run.sh or an executable "run"');
+  if (problems.length) throw new Error(`jobs/${name}:\n  - ${problems.join('\n  - ')}`);
+  return job;
+}
+
+function jobNames() {
+  try { return fs.readdirSync(JOBS, { withFileTypes: true }).filter((e) => e.isDirectory() && NAME.test(e.name)).map((e) => e.name).sort(); }
+  catch { return []; }
+}
+
+const stateDir = (name) => { const d = path.join(STATE, name); fs.mkdirSync(path.join(d, 'runs'), { recursive: true }); return d; };
+const readStatus = (name) => readJSON(path.join(STATE, name, 'status.json'), {});
+
+function acquire(name) {
+  const lock = path.join(stateDir(name), 'lock');
+  try { fs.writeFileSync(lock, String(process.pid), { flag: 'wx' }); return () => fs.rmSync(lock, { force: true }); } catch {}
+  const pid = Number(fs.readFileSync(lock, 'utf8'));
+  try { process.kill(pid, 0); return null; } catch { fs.rmSync(lock, { force: true }); return acquire(name); }
+}
+
+function dotenv(file) {
+  const env = {};
+  try {
+    for (const line of fs.readFileSync(file, 'utf8').split('\n')) {
+      const m = line.match(/^\s*([A-Za-z_][A-Za-z0-9_]*)\s*=\s*(.*?)\s*$/);
+      if (m) env[m[1]] = m[2].replace(/^(['"])(.*)\1$/, '$2');
+    }
+  } catch {}
+  return env;
+}
+
+// ---------------------------------------------------------------- one run
+
+async function duck() {
+  return (await import(pathToFileURL(DUCKDB).href)).DuckDBInstance;
+}
+
+/** Run the job once. Returns the status object. log(line) gets every line. */
+async function runJob(job, { dryRun = false, trigger = 'manual', echo = false } = {}) {
+  const sdir = stateDir(job.name);
+  const release = acquire(job.name);
+  if (!release) throw new Error(`${job.name} is already running`);
+  const started = stamp();
+  const logFile = path.join(sdir, 'runs', `${started.replace(/[:.]/g, '-')}${dryRun ? '-dry' : ''}.log`);
+  const logStream = fs.createWriteStream(logFile);
+  const log = (line) => { logStream.write(`${line}\n`); if (echo) console.log(line); };
+  const status = { ...readStatus(job.name), running: true, last_started: started, last_trigger: trigger };
+  if (!dryRun) writeJSON(path.join(sdir, 'status.json'), status);
+  const t0 = Date.now();
+  let result = { ok: false };
+  try {
+    log(`# ${job.name} ${dryRun ? '(dry run) ' : ''}${started} trigger=${trigger} bot=${job.bot.name}`);
+    const out = path.join(sdir, 'out');
+    fs.rmSync(out, { recursive: true, force: true });
+    fs.mkdirSync(out, { recursive: true });
+
+    // 1. collect
+    const [cmd, args] = job.command ? ['/bin/sh', ['-c', job.command]]
+      : job.script.endsWith('.py') ? ['python3', [job.script]]
+      : /\.m?js$/.test(job.script) ? [process.execPath, [job.script]]
+      : job.script.endsWith('.sh') ? ['bash', [job.script]]
+      : [`./${job.script}`, []];
+    const env = {
+      ...process.env, ...dotenv(path.join(job.dir, '.env')),
+      WEBDATA_OUT: out, WEBDATA_JOB: job.name, WEBDATA_BOT: job.bot.name,
+      WEBDATA_SNAPSHOT: job.bot.snapshot || '', WEBDATA_DRY_RUN: dryRun ? '1' : '',
+    };
+    log(`$ ${[cmd, ...args].join(' ')}   (cwd jobs/${job.name}, timeout ${job.timeoutMinutes}m)`);
+    const code = await new Promise((resolve) => {
+      const child = spawn(cmd, args, { cwd: job.dir, env, detached: true, stdio: ['ignore', 'pipe', 'pipe'] });
+      const pipe = (stream, tag) => {
+        let buf = '';
+        stream.on('data', (d) => { buf += d; let i; while ((i = buf.indexOf('\n')) >= 0) { log(`${tag}${buf.slice(0, i)}`); buf = buf.slice(i + 1); } });
+        stream.on('end', () => { if (buf) log(`${tag}${buf}`); });
+      };
+      pipe(child.stdout, '  ');
+      pipe(child.stderr, '! ');
+      const timer = setTimeout(() => { log(`timeout after ${job.timeoutMinutes} minutes; killing`); try { process.kill(-child.pid, 'SIGKILL'); } catch {} }, job.timeoutMinutes * 60_000);
+      child.on('error', (e) => { log(`could not start: ${e.message}`); clearTimeout(timer); resolve(-1); });
+      child.on('close', (c, sig) => { clearTimeout(timer); resolve(sig ? -1 : c); });
+    });
+    if (code !== 0) throw new Error(`script exited with ${code}; nothing written`);
+
+    // 2. stage + validate (no lock on the bot's database yet)
+    const DuckDBInstance = await duck();
+    const stageFile = path.join(sdir, 'stage.duckdb');
+    fs.rmSync(stageFile, { force: true }); fs.rmSync(`${stageFile}.wal`, { force: true });
+    const stage = await DuckDBInstance.create(stageFile);
+    const sc = await stage.connect();
+    const rows = (sql) => sc.runAndReadAll(sql).then((r) => r.getRowObjectsJson());
+    const summary = {};
+    try {
+      for (const [t, spec] of Object.entries(job.tables)) {
+        const file = FORMATS.map((f) => path.join(out, `${t}.${f}`)).find((f) => fs.existsSync(f));
+        if (!file) throw new Error(`script did not write ${t}.{${FORMATS.join(',')}} to $WEBDATA_OUT; nothing written`);
+        const ext = path.extname(file).slice(1);
+        const reader = ext === 'parquet' ? 'read_parquet' : ext === 'csv' ? 'read_csv_auto' : 'read_json_auto';
+        await sc.run(`CREATE TABLE ${q(t)} AS SELECT * FROM ${reader}(${lit(file)})`);
+        const [{ n }] = await rows(`SELECT count(*)::INTEGER AS n FROM ${q(t)}`);
+        const cols = await rows(`SELECT column_name AS name, data_type AS type FROM duckdb_columns() WHERE table_name = ${lit(t)} AND database_name = current_database() ORDER BY column_index`);
+        if (n < spec.min_rows) throw new Error(`${t}: ${n} rows, fewer than min_rows ${spec.min_rows}; nothing written`);
+        if (spec.mode === 'upsert') {
+          for (const k of spec.key) if (!cols.some((c) => c.name === k)) throw new Error(`${t}: key column "${k}" not in output; nothing written`);
+          const keyList = spec.key.map(q).join(', ');
+          const [{ dups, nulls }] = await rows(`SELECT (SELECT count(*) FROM (SELECT ${keyList} FROM ${q(t)} GROUP BY ALL HAVING count(*) > 1))::INTEGER AS dups,
+            (SELECT count(*) FROM ${q(t)} WHERE ${spec.key.map((k) => `${q(k)} IS NULL`).join(' OR ')})::INTEGER AS nulls`);
+          if (dups || nulls) throw new Error(`${t}: key (${spec.key.join(', ')}) has ${dups} duplicate and ${nulls} null values; nothing written`);
+        }
+        summary[t] = { rows: n, columns: cols, mode: spec.mode, file: path.basename(file) };
+        log(`staged ${t}: ${n} rows from ${path.basename(file)} (${spec.mode}) · ${cols.map((c) => `${c.name} ${c.type}`).join(', ')}`);
+      }
+    } finally {
+      sc.closeSync(); stage.closeSync();
+    }
+
+    // Compare with what the bot has now (from the published snapshot: no lock needed).
+    if (job.bot.snapshot && fs.existsSync(job.bot.snapshot)) {
+      const mem = await DuckDBInstance.create(':memory:');
+      const mc = await mem.connect();
+      try {
+        await mc.run(`ATTACH ${lit(job.bot.snapshot)} AS cur (READ_ONLY)`);
+        for (const [t, s] of Object.entries(summary)) {
+          const cur = (await mc.runAndReadAll(`SELECT column_name AS name, data_type AS type FROM duckdb_columns() WHERE database_name = 'cur' AND schema_name = 'main' AND table_name = ${lit(t)} ORDER BY column_index`)).getRowObjectsJson();
+          if (!cur.length) { log(`${t}: new table`); continue; }
+          const sig = (cs) => cs.map((c) => `${c.name} ${c.type}`).join(', ');
+          const [{ n }] = (await mc.runAndReadAll(`SELECT count(*)::INTEGER AS n FROM cur.main.${q(t)}`)).getRowObjectsJson();
+          log(`${t}: currently ${n} rows`);
+          if (sig(cur) !== sig(s.columns)) {
+            const msg = `${t}: columns differ from the current table\n    now: ${sig(cur)}\n    new: ${sig(s.columns)}`;
+            if (job.tables[t].mode !== 'replace' || !job.tables[t].allow_schema_change) {
+              throw new Error(`${msg}\n  Reports and SQL may depend on the current columns. Make the script match them, or set "allow_schema_change": true (replace mode only). Nothing written.`);
+            }
+            log(`warning: ${msg} (allowed by allow_schema_change)`);
+          }
+        }
+      } finally { mc.closeSync(); mem.closeSync(); }
+    }
+
+    if (dryRun) {
+      log(`dry run OK: staged output is in ${path.relative(ROOT, out)}/ and ${path.relative(ROOT, stageFile)}; nothing written`);
+      result = { ok: true, dry: true, tables: summary };
+      return result;
+    }
+
+    // 3. apply: wait for the bot's database, then one short transaction.
+    const deadline = Date.now() + job.lockWaitMinutes * 60_000;
+    let db;
+    for (let attempt = 1; ; attempt++) {
+      try { db = await DuckDBInstance.create(job.bot.db); break; } catch (e) {
+        if (!/lock/i.test(e.message) || Date.now() > deadline) throw new Error(`could not open ${job.bot.name}'s database: ${e.message.split('\n')[0]}; nothing written`);
+        if (attempt === 1) log(`${job.bot.name}'s database is in use by OpenMausBot; waiting (up to ${job.lockWaitMinutes}m)`);
+        await sleep(LOCK_RETRY_MS);
+      }
+    }
+    const c = await db.connect();
+    const ta = Date.now();
+    try {
+      await c.run(`ATTACH ${lit(stageFile)} AS stage (READ_ONLY)`);
+      await c.run('BEGIN TRANSACTION');
+      for (const [t, spec] of Object.entries(job.tables)) {
+        const exists = (await c.runAndReadAll(`SELECT 1 FROM duckdb_tables() WHERE database_name = current_database() AND schema_name = 'main' AND table_name = ${lit(t)}`)).getRows().length > 0;
+        const target = `main.${q(t)}`;
+        if (spec.mode === 'replace' || !exists) {
+          await c.run(`CREATE OR REPLACE TABLE ${target} AS SELECT * FROM stage.${q(t)}`);
+        } else {
+          if (spec.mode === 'upsert') {
+            await c.run(`DELETE FROM ${target} AS cur USING stage.${q(t)} AS s WHERE ${spec.key.map((k) => `cur.${q(k)} = s.${q(k)}`).join(' AND ')}`);
+          }
+          await c.run(`INSERT INTO ${target} BY NAME SELECT * FROM stage.${q(t)}`);
+        }
+        const [{ n }] = (await c.runAndReadAll(`SELECT count(*)::INTEGER AS n FROM ${target}`)).getRowObjectsJson();
+        summary[t].rows_after = n;
+        log(`applied ${t}: ${spec.mode}${exists ? '' : ' (created)'} → ${n} rows`);
+      }
+      await c.run('COMMIT');
+      await c.run('CHECKPOINT');
+    } catch (e) {
+      try { await c.run('ROLLBACK'); } catch {}
+      throw new Error(`apply failed, rolled back: ${e.message.split('\n')[0]}`);
+    } finally {
+      c.closeSync(); db.closeSync();
+    }
+    log(`held ${job.bot.name}'s database for ${Date.now() - ta} ms`);
+    result = { ok: true, tables: summary };
+    return result;
+  } catch (e) {
+    log(`FAILED: ${e.message}`);
+    result = { ok: false, error: e.message.split('\n')[0] };
+    return result;
+  } finally {
+    const seconds = Math.round((Date.now() - t0) / 100) / 10;
+    log(`# done in ${seconds}s: ${result.ok ? 'ok' : 'failed'}`);
+    if (!result.dry) {
+      Object.assign(status, { running: false, last_finished: stamp(), last_ok: result.ok, last_error: result.error ?? null,
+        last_duration_s: seconds, last_log: path.relative(ROOT, logFile) });
+      if (result.ok) {
+        status.last_success = status.last_finished;
+        status.last_rows = Object.fromEntries(Object.entries(result.tables).map(([t, s]) => [t, s.rows_after ?? s.rows]));
+        status.consecutive_failures = 0;
+        status.notified_at = null;
+      } else {
+        status.consecutive_failures = (status.consecutive_failures || 0) + 1;
+      }
+      writeJSON(path.join(sdir, 'status.json'), status);
+      if (trigger === 'schedule' && !result.ok) {
+        await new Promise((r) => logStream.write('', r));
+        await maybeNotify(job, status, logFile, log);
+        writeJSON(path.join(sdir, 'status.json'), status);
+      }
+    }
+    await new Promise((r) => logStream.end(r));
+    const logs = fs.readdirSync(path.join(sdir, 'runs')).sort();
+    for (const old of logs.slice(0, Math.max(0, logs.length - KEEP_LOGS))) fs.rmSync(path.join(sdir, 'runs', old), { force: true });
+    release();
+  }
+}
+
+// ---------------------------------------------------------------- notify
+
+function webhookFor(botName) {
+  if (!fs.existsSync(NOTIFY_FILE)) return null;
+  const mode = fs.statSync(NOTIFY_FILE).mode & 0o077;
+  if (mode) console.error(`warning: ${path.relative(ROOT, NOTIFY_FILE)} is readable by others; chmod 600 it`);
+  const map = dotenv(NOTIFY_FILE);
+  const key = Object.keys(map).find((k) => k.toLowerCase() === String(botName).toLowerCase()) ?? (map['*'] ? '*' : null);
+  return key ? map[key] : null;
+}
+
+async function postWebhook(url, payload) {
+  const res = await fetch(url, {
+    method: 'POST', headers: { 'content-type': 'application/json' },
+    body: JSON.stringify(payload), signal: AbortSignal.timeout(10_000),
+  });
+  const text = (await res.text()).slice(0, 300);
+  if (!res.ok) throw new Error(`HTTP ${res.status} ${text}`);
+  return text;
+}
+
+/** After a scheduled run: tell the bot about a failure (first one, then daily). */
+async function maybeNotify(job, status, logFile, log) {
+  if (status.last_ok) return;
+  const due = !status.notified_at || Date.now() - Date.parse(status.notified_at) > RENOTIFY_MS;
+  if (!due) { log(`notify: already sent ${ago(status.notified_at)}; next reminder after 24h`); return; }
+  const url = webhookFor(job.bot.name);
+  if (!url) { log(`notify: no webhook for ${job.bot.name} in ${path.relative(ROOT, NOTIFY_FILE)}; not notified`); return; }
+  const tail = fs.readFileSync(logFile, 'utf8').split('\n').slice(-80).join('\n').slice(-16_000);
+  const payload = {
+    event: 'webdata.job.failed',
+    job: job.name, bot: job.bot.name, description: job.description,
+    error: status.last_error, consecutive_failures: status.consecutive_failures,
+    last_success: status.last_success ?? null, failed_at: status.last_finished,
+    schedule: `${job.schedule} (${job.timezone})`, tables: Object.keys(job.tables),
+    job_dir: job.dir, log_file: logFile, log_tail: tail,
+    how_to_investigate: [
+      `webdata-job logs ${job.name}`,
+      `webdata-job run ${job.name} --dry-run`,
+      'Follow "Fixing a failed job" in the webdata-data-job skill.',
+    ],
+  };
+  try {
+    await postWebhook(url, payload);
+    status.notified_at = stamp();
+    log(`notify: sent failure to ${job.bot.name}'s webhook`);
+  } catch (e) {
+    log(`notify: webhook failed: ${e.message}`);
+  }
+}
+
+// ---------------------------------------------------------------- daemon
+
+async function daemon() {
+  console.log(`${stamp()} webdata-jobs: watching ${JOBS}`);
+  const lastFired = new Map();
+  const running = new Set();
+  const broken = new Map();
+  for (;;) {
+    await sleep(60_000 - (Date.now() % 60_000) + 500);   // just after each minute boundary
+    const now = new Date();
+    const minute = Math.floor(now.getTime() / 60_000);
+    for (const name of jobNames()) {
+      let job;
+      try { job = loadJob(name); broken.delete(name); } catch (e) {
+        if (broken.get(name) !== e.message) { console.log(`${stamp()} ${name}: invalid, skipped\n${e.message}`); broken.set(name, e.message); }
+        continue;
+      }
+      if (!job.enabled || running.has(name) || lastFired.get(name) === minute || !cronMatches(job.cron, now, job.timezone)) continue;
+      lastFired.set(name, minute);
+      running.add(name);
+      console.log(`${stamp()} ${name}: starting`);
+      runJob(job, { trigger: 'schedule' })
+        .then((r) => console.log(`${stamp()} ${name}: ${r.ok ? 'ok' : `FAILED: ${r.error}`}`))
+        .catch((e) => console.log(`${stamp()} ${name}: ${e.message}`))
+        .finally(() => running.delete(name));
+    }
+  }
+}
+
+// ---------------------------------------------------------------- commands
+
+function flags(args) {
+  const out = { _: [] };
+  for (let i = 0; i < args.length; i++) {
+    const a = args[i];
+    if (a.startsWith('--')) {
+      const k = a.slice(2);
+      const v = args[i + 1] && !args[i + 1].startsWith('--') ? args[++i] : true;
+      out[k] = out[k] === undefined ? v : [].concat(out[k], v);
+    } else out._.push(a);
+  }
+  return out;
+}
+
+const SCRIPT_TEMPLATE = `#!/usr/bin/env python3
+"""__DESCRIPTION__
+
+Run by webdata-jobs on the schedule in job.json (python3 standard library only).
+
+Contract: write one file per table declared in job.json into $WEBDATA_OUT,
+named <table>.json (a JSON array of objects), .ndjson, .csv or .parquet,
+using the same column names and types as the table already in the bot's
+database. Exit non-zero on ANY problem: nothing is written to the bot's
+database unless every declared table is produced and passes the checks.
+Print a short progress line or two; it goes to the run log.
+"""
+import json
+import os
+import sys
+import urllib.request
+
+OUT = os.environ["WEBDATA_OUT"]
+
+
+def fetch_json(url, timeout=30):
+    req = urllib.request.Request(url, headers={"User-Agent": "webdata-job (+openmausbot)"})
+    with urllib.request.urlopen(req, timeout=timeout) as resp:
+        return json.load(resp)
+
+
+def write_table(name, rows):
+    if not rows:
+        sys.exit(f"{name}: no rows collected")
+    with open(os.path.join(OUT, f"{name}.json"), "w") as f:
+        json.dump(rows, f)
+    print(f"{name}: {len(rows)} rows")
+
+
+def main():
+__BODY__
+
+
+if __name__ == "__main__":
+    main()
+`;
+
+const commands = {
+  list() {
+    const names = jobNames();
+    if (!names.length) { console.log(`no jobs yet (create one: webdata-job new <name> ...)`); return; }
+    for (const name of names) {
+      const st = readStatus(name);
+      let job;
+      try { job = loadJob(name); } catch (e) { console.log(`${name}  INVALID: ${e.message.split('\n').slice(1).join('; ').trim()}`); continue; }
+      const next = job.enabled ? nextRuns(job.cron, job.timezone, 1)[0] : null;
+      const last = st.last_finished ? `${st.last_ok ? 'ok' : `FAILED${st.consecutive_failures > 1 ? ` ×${st.consecutive_failures}` : ''}`} ${ago(st.last_finished)}` : 'never run';
+      console.log(`${name}  ${job.enabled ? 'enabled ' : 'DISABLED'}  "${job.schedule}" ${job.timezone}  bot ${job.bot.name} → ${Object.keys(job.tables).join(', ')}`);
+      console.log(`    last: ${st.running ? 'RUNNING now' : last}${st.last_error && !st.last_ok ? ` (${st.last_error})` : ''}   next: ${next ? fmtTime(next, job.timezone) : '-'}`);
+      if (job.description) console.log(`    ${job.description}`);
+    }
+  },
+
+  show([name]) {
+    const job = loadJob(name);
+    console.log(fs.readFileSync(path.join(job.dir, 'job.json'), 'utf8').trim());
+    console.log(`\nvalid · script: ${job.command ?? job.script} · bot database: ${job.bot.db}`);
+    console.log(`next runs (${job.enabled ? 'enabled' : 'DISABLED: these would be the times'}):`);
+    for (const d of nextRuns(job.cron, job.timezone, 5)) console.log(`  ${fmtTime(d, job.timezone)}  (${d.toISOString().slice(0, 16)}Z)`);
+  },
+
+  async run([name], f) {
+    const job = loadJob(name);
+    const r = await runJob(job, { dryRun: Boolean(f['dry-run']), trigger: 'manual', echo: true });
+    process.exitCode = r.ok ? 0 : 1;
+  },
+
+  logs([name], f) {
+    loadJob(name);
+    const dir = path.join(STATE, name, 'runs');
+    const runs = fs.existsSync(dir) ? fs.readdirSync(dir).sort() : [];
+    if (!runs.length) { console.log('no runs yet'); return; }
+    if (f.all) { for (const r of runs) console.log(r); return; }
+    process.stdout.write(fs.readFileSync(path.join(dir, runs.at(-1)), 'utf8'));
+  },
+
+  async 'notify-test'([botName]) {
+    const bot = resolveBot(botName);
+    const url = webhookFor(bot.name);
+    if (!url) throw new Error(`no webhook for ${bot.name} in ${path.relative(ROOT, NOTIFY_FILE)} (line: ${bot.name}=<webhook URL>)`);
+    const reply = await postWebhook(url, {
+      event: 'webdata.job.test', bot: bot.name, sent_at: stamp(),
+      note: 'Test from webdata-job notify-test. No job failed; reply that the notification arrived and do nothing else.',
+    });
+    console.log(`sent to ${bot.name}'s webhook: ${reply || 'ok'}`);
+  },
+
+  enable([name]) { setEnabled(name, true); },
+  disable([name]) { setEnabled(name, false); },
+
+  new([name], f) {
+    if (!name || !NAME.test(name)) throw new Error('usage: webdata-job new <name> --bot <bot> --table <t>[:mode[:key,key]] ... --schedule "<cron>" [--tz <IANA>] [--description "..."]');
+    const dir = path.join(JOBS, name);
+    if (fs.existsSync(dir)) throw new Error(`jobs/${name} already exists`);
+    const bot = resolveBot(f.bot);
+    const tables = {};
+    for (const spec of [].concat(f.table || [])) {
+      const [t, mode = 'replace', key] = String(spec).split(':');
+      tables[t] = { mode, ...(key ? { key: key.split(',') } : {}) };
+    }
+    if (!Object.keys(tables).length) throw new Error('give at least one --table <name>[:mode[:key,key]]');
+    const schedule = String(f.schedule || '');
+    parseCron(schedule);
+    const job = { description: String(f.description || ''), bot: bot.name, schedule, timezone: String(f.tz || 'UTC'), enabled: false, timeout_minutes: 10, tables };
+    fs.mkdirSync(dir, { recursive: true });
+    writeJSON(path.join(dir, 'job.json'), job);
+    const body = Object.keys(tables).map((t) => `    ${t} = []  # TODO: collect rows (dicts) for ${t}\n    write_table("${t}", ${t})`).join('\n');
+    const script = path.join(dir, 'run.py');
+    fs.writeFileSync(script, SCRIPT_TEMPLATE.replace('__DESCRIPTION__', job.description || name).replace('__BODY__', body));
+    fs.chmodSync(script, 0o755);
+    loadJob(name);
+    console.log(`created jobs/${name}/ (job.json, run.py) DISABLED.\nNext: write run.py, then: webdata-job run ${name} --dry-run`);
+  },
+
+  daemon,
+};
+
+function setEnabled(name, on) {
+  const job = loadJob(name);
+  const file = path.join(job.dir, 'job.json');
+  const raw = readJSON(file, {});
+  raw.enabled = on;
+  writeJSON(file, raw);
+  const next = on ? nextRuns(job.cron, job.timezone, 1)[0] : null;
+  console.log(`${name} ${on ? `enabled; next run ${fmtTime(next, job.timezone)}` : 'disabled'}`);
+  if (on && !readStatus(name).last_success) console.log(`warning: ${name} has never completed a real run; test it with: webdata-job run ${name}`);
+}
+
+const [cmd, ...rest] = process.argv.slice(2);
+const f = flags(rest);
+if (!commands[cmd]) {
+  process.stdout.write(fs.readFileSync(fileURLToPath(import.meta.url), 'utf8').split('\n').slice(1, 24).map((l) => l.replace(/^\/\/ ?/, '')).join('\n') + '\n');
+  process.exit(cmd ? 2 : 0);
+}
+try {
+  await commands[cmd](f._, f);
+} catch (e) {
+  console.error(e.message);
+  process.exit(1);
+}

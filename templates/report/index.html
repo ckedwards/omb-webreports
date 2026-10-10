@@ -1,0 +1,88 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<!-- first: reports JS errors to the server log (bin/webdata-errors) -->
+<script src="/lib/report-errors.js"></script>
+<title>__TITLE__</title>
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-title" content="__TITLE__">
+<meta name="apple-mobile-web-app-status-bar-style" content="default">
+<meta name="theme-color" content="#f9f9f7" media="(prefers-color-scheme: light)">
+<meta name="theme-color" content="#0d0d0d" media="(prefers-color-scheme: dark)">
+<link rel="apple-touch-icon" href="icon-180.png">
+<link rel="manifest" href="manifest.webmanifest">
+<link rel="stylesheet" href="/lib/kit.css">
+<!-- DuckDB-WASM comes from jsDelivr: open the connection while the page parses. -->
+<link rel="preconnect" href="https://cdn.jsdelivr.net" crossorigin>
+<!-- webdata:modules: written by webdata-sync (versioned module URLs); do not edit -->
+<script type="importmap">{"imports":{"/lib/kit.js":"/lib/kit.js?v=8e741d027c0a"}}</script>
+<link rel="modulepreload" href="/lib/kit.js?v=8e741d027c0a">
+<!-- /webdata:modules -->
+<!-- defer: paint first; deferred scripts still run before the module below. -->
+<script defer src="/lib/vendor/d3.min.js"></script>
+<script defer src="/lib/vendor/plot.umd.min.js"></script>
+<style>
+  /* Report-specific styles go here; shared tokens/components come from kit.css. */
+</style>
+</head>
+<body>
+<header class="app-header">
+  <div class="inner">
+    <a class="back" href="/" aria-label="All reports">‹</a>
+    <div class="titles">
+      <h1>__TITLE__</h1>
+      <div data-kit-status></div>
+    </div>
+  </div>
+</header>
+
+<main>
+  <!-- Starter: a table explorer for the database. Replace with the real report.
+       Design system: ROOT/DESIGN.md · live examples: /reports/_gallery/ -->
+  <div class="filters">
+    <select id="pick" aria-label="Table"></select>
+  </div>
+  <section class="grid stats" id="stats"></section>
+  <article class="card">
+    <header><h2 id="table-title"></h2><p id="table-note"></p></header>
+    <div id="table"></div>
+  </article>
+</main>
+
+<script type="module">
+import { report, table, stats, empty, fmt } from '/lib/kit.js';
+
+const DB = '__DB__';
+const pick = document.getElementById('pick');
+
+const app = report({
+  databases: [DB],
+  async render(db) {
+    const tables = await db.query(`
+      SELECT table_name AS name, estimated_size AS rows
+      FROM duckdb_tables() WHERE database_name = '${DB}' AND schema_name = 'main'
+      ORDER BY table_name`);
+    if (!pick.options.length) {
+      for (const t of tables) pick.add(new Option(t.name, t.name));
+      pick.onchange = () => app.redraw();
+    }
+    const name = pick.value || tables[0]?.name;
+    if (!name) { empty(document.getElementById('table'), 'No tables yet.'); return; }
+
+    const rows = await db.query(`SELECT * FROM ${DB}.main."${name}" LIMIT 500`);
+    stats(document.getElementById('stats'), [
+      { label: 'Tables', value: fmt.num(tables.length) },
+      { label: 'Rows in this table', value: fmt.num(tables.find((t) => t.name === name)?.rows) },
+      { label: 'Columns', value: fmt.num(Object.keys(rows[0] || {}).length) },
+    ]);
+    document.getElementById('table-title').textContent = name;
+    document.getElementById('table-note').textContent = rows.length === 500 ? 'First 500 rows' : `${rows.length} rows`;
+    table(document.getElementById('table'), rows);
+  },
+});
+</script>
+</body>
+</html>

@@ -1,0 +1,9 @@
+{
+  "title": "Blue Jays 2026",
+  "short_name": "Jays 2026",
+  "description": "The 79–83 season: team totals, the home run race, hitters' on-base vs. power, and the pitching staff.",
+  "databases": ["bramble"],
+  "tags": ["baseball", "mlb"],
+  "theme_color": "#134a8e",
+  "created": "2026-10-10"
+}

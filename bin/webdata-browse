@@ -1,0 +1,117 @@
+#!/usr/bin/env node
+// webdata-browse: load a page in headless Chrome (JavaScript runs), then print
+// its HTML, its text, or the result of a JavaScript expression evaluated in the
+// page. For job scripts whose source only renders in a browser.
+//
+//   webdata-browse <url> [--wait <css>] [--wait-ms <n>] [--timeout <s>]
+//                        [--html | --text | --eval '<js expression>']
+//
+//   --wait <css>     wait until this element exists (do this, rather than --wait-ms)
+//   --wait-ms <n>    extra fixed wait after load/--wait, in ms
+//   --timeout <s>    give up after this many seconds overall (default 60)
+//   --html           print document HTML after rendering (default)
+//   --text           print document.body.innerText
+//   --eval <js>      print the expression's value; objects/arrays print as JSON.
+//                    Best way to scrape: return exactly the rows you need, e.g.
+//                    [...document.querySelectorAll('table tr')].map(r => [...r.cells].map(c => c.innerText))
+//
+// Exit status: 0 with output on stdout; non-zero with the reason on stderr
+// (navigation failed, --wait timed out, eval threw, empty result).
+//
+// Each call uses a fresh, throwaway browser profile under /tmp (no cookies, no
+// logins, nothing shared with the bots' own browser sessions) and removes it
+// afterwards. Works inside the webdata-jobs sandbox.
+
+import { execFile } from 'node:child_process';
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
+
+const usage = () => {
+  const src = fs.readFileSync(new URL(import.meta.url), 'utf8').split('\n').slice(1, 24);
+  process.stderr.write(src.map((l) => l.replace(/^\/\/ ?/, '')).join('\n') + '\n');
+  process.exit(2);
+};
+
+const args = process.argv.slice(2);
+const opt = { mode: 'html', timeout: 60 };
+for (let i = 0; i < args.length; i++) {
+  const a = args[i];
+  if (a === '--wait') opt.wait = args[++i];
+  else if (a === '--wait-ms') opt.waitMs = Number(args[++i]);
+  else if (a === '--timeout') opt.timeout = Number(args[++i]);
+  else if (a === '--html') opt.mode = 'html';
+  else if (a === '--text') opt.mode = 'text';
+  else if (a === '--eval') { opt.mode = 'eval'; opt.js = args[++i]; }
+  else if (a === '-h' || a === '--help') usage();
+  else if (!opt.url && !a.startsWith('--')) opt.url = a;
+  else { console.error(`unknown argument: ${a}`); usage(); }
+}
+if (!opt.url || !/^https?:\/\//.test(opt.url)) usage();
+if (opt.mode === 'eval' && !opt.js) usage();
+
+const newest = (pattern) => {
+  const [dir, rest] = pattern;
+  try {
+    return fs.readdirSync(dir).sort((a, b) => a.localeCompare(b, undefined, { numeric: true }))
+      .map((d) => path.join(dir, d, rest)).filter((p) => fs.existsSync(p)).pop();
+  } catch { return undefined; }
+};
+const HOME = os.homedir();
+const AB = newest([path.join(HOME, '.openmausbot', 'tools', 'agent-browser'), 'agent-browser']);
+const CHROME = newest([path.join(HOME, '.agent-browser', 'browsers'), 'chrome']);
+if (!AB || !CHROME) {
+  console.error('webdata-browse: agent-browser or Chrome not found (expected under ~/.openmausbot/tools and ~/.agent-browser/browsers)');
+  process.exit(3);
+}
+
+// Short path: Unix sockets live here and their paths are length-limited.
+const home = fs.mkdtempSync('/tmp/wb.');
+const env = {
+  ...process.env, HOME: home, XDG_RUNTIME_DIR: home, XDG_CONFIG_HOME: path.join(home, '.config'),
+  XDG_CACHE_HOME: path.join(home, '.cache'), AGENT_BROWSER_SOCKET_DIR: home,
+  AGENT_BROWSER_EXECUTABLE_PATH: CHROME,
+};
+const deadline = Date.now() + opt.timeout * 1000;
+
+function ab(...cmd) {
+  const left = deadline - Date.now();
+  if (left <= 0) return Promise.reject(new Error(`timed out after ${opt.timeout}s`));
+  return new Promise((resolve, reject) => {
+    execFile(AB, ['--json', '--session', 'wb', ...cmd], { env, timeout: left, maxBuffer: 64 * 1024 * 1024 }, (err, stdout) => {
+      let out;
+      try { out = JSON.parse(stdout); } catch {
+        return reject(new Error(err?.killed ? `timed out after ${opt.timeout}s` : `agent-browser: ${(err?.message || stdout || 'no output').split('\n')[0]}`));
+      }
+      if (!out.success) return reject(new Error(out.error || 'agent-browser failed'));
+      resolve(out.data);
+    });
+  });
+}
+
+let code = 0;
+try {
+  await ab('open', opt.url);
+  if (opt.wait) {
+    try { await ab('wait', opt.wait, '--timeout', String(Math.max(1000, deadline - Date.now() - 2000))); }
+    catch (e) { throw new Error(`--wait "${opt.wait}": ${e.message}`); }
+  }
+  if (opt.waitMs > 0) await ab('wait', String(opt.waitMs));
+  const js = opt.mode === 'eval' ? opt.js
+    : opt.mode === 'text' ? 'document.body ? document.body.innerText : ""'
+    : 'document.documentElement.outerHTML';
+  const { result } = await ab('eval', js);
+  if (result == null || result === '' || (Array.isArray(result) && !result.length)) throw new Error('empty result');
+  process.stdout.write(typeof result === 'string' ? result : JSON.stringify(result));
+  if (process.stdout.isTTY) process.stdout.write('\n');
+} catch (e) {
+  console.error(`webdata-browse: ${e.message}`);
+  code = 1;
+} finally {
+  // Cleanup has its own budget (the deadline may be spent), then a hard stop
+  // for anything still running from this throwaway profile.
+  await new Promise((r) => execFile(AB, ['--session', 'wb', 'close'], { env, timeout: 10_000 }, () => r()));
+  await new Promise((r) => execFile('pkill', ['-KILL', '-f', home], () => r()));
+  fs.rmSync(home, { recursive: true, force: true });
+}
+process.exit(code);

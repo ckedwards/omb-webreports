@@ -1,0 +1,89 @@
+#!/usr/bin/env node
+// webdata-ls: compact listing of reports and published data, for people and bots.
+//
+//   webdata-ls            reports + databases
+//   webdata-ls reports    reports only
+//   webdata-ls data       databases with every table and its columns
+//   webdata-ls <slug>     one report: metadata, files, the databases it uses
+//
+// Reads the generated webroot/reports/index.json and webroot/data/catalog.json;
+// run `webdata-sync --once` first if something was just changed.
+
+import fs from 'node:fs';
+import path from 'node:path';
+
+import { ROOT, SITE_URL } from './_config.mjs';
+const WEB = path.join(ROOT, 'webroot');
+const SITE = SITE_URL;
+
+const readJSON = (f) => JSON.parse(fs.readFileSync(path.join(WEB, f), 'utf8'));
+const ago = (iso) => {
+  if (!iso) return 'never';
+  const m = Math.round((Date.now() - Date.parse(iso)) / 60000);
+  return m < 1 ? 'just now' : m < 60 ? `${m}m ago` : m < 2880 ? `${Math.round(m / 60)}h ago` : `${Math.round(m / 1440)}d ago`;
+};
+const kb = (n) => n < 1024 ? `${n} B` : n < 1048576 ? `${(n / 1024).toFixed(0)} KB` : `${(n / 1048576).toFixed(1)} MB`;
+
+const { reports } = readJSON('reports/index.json');
+const { databases } = readJSON('data/catalog.json');
+const arg = process.argv[2];
+
+function listReports() {
+  console.log(`REPORTS (${reports.length})  ${SITE}/`);
+  if (!reports.length) console.log('  (none)');
+  for (const r of reports) {
+    console.log(`  ${r.slug}  "${r.title}"  db: ${r.databases.join(', ') || '-'}  edited ${ago(r.updated)}  data ${ago(r.data_updated)}`);
+    if (r.description) console.log(`      ${r.description}`);
+  }
+  const drafts = fs.readdirSync(path.join(WEB, 'reports'), { withFileTypes: true })
+    .filter((e) => e.isDirectory() && /^[._]/.test(e.name)).map((e) => e.name);
+  if (drafts.length) console.log(`  hidden/drafts: ${drafts.join(', ')}`);
+}
+
+function listData(detail) {
+  console.log(`DATABASES (${databases.length})  attach by name in kit: databases: ['<name>']`);
+  for (const d of databases) {
+    const src = d.source.type === 'openmausbot' ? `bot ${d.source.bot}` : 'file';
+    console.log(`  ${d.name}  (${d.format}, ${src}, ${kb(d.bytes)}, updated ${ago(d.updated)})`);
+    for (const t of d.tables) {
+      if (!detail && t.schema && t.schema !== 'main') continue;
+      const name = t.schema ? `${d.name}.${t.schema}.${t.name}` : `read_parquet('${SITE}${d.url}')`;
+      console.log(`    ${name}  ${t.rows != null ? `${t.rows} rows` : t.type}`);
+      if (detail) console.log(`      ${t.columns.map((c) => `${c.name} ${c.type}`).join(', ')}`);
+    }
+    const other = d.tables.filter((t) => t.schema && t.schema !== 'main').length;
+    if (!detail && other) console.log(`    (+${other} in other schemas; omb_results = bot's cached card results, don't use)`);
+  }
+}
+
+function showReport(slug) {
+  const r = reports.find((x) => x.slug === slug);
+  const dir = path.join(WEB, 'reports', slug);
+  if (!r && !fs.existsSync(dir)) {
+    console.error(`no report "${slug}". Reports: ${reports.map((x) => x.slug).join(', ') || '(none)'}`);
+    process.exit(1);
+  }
+  if (!r) console.log(`${slug}: directory exists but is not in the index (draft, or report.json invalid; run webdata-sync --once)`);
+  else {
+    console.log(`${r.title}  ${SITE}${r.url}`);
+    console.log(`  ${r.description || '(no description)'}`);
+    console.log(`  tags: ${r.tags.join(', ') || '-'}   edited ${ago(r.updated)}   data ${ago(r.data_updated)}`);
+  }
+  console.log(`  dir: ${dir}`);
+  for (const f of fs.readdirSync(dir).sort()) {
+    const st = fs.statSync(path.join(dir, f));
+    console.log(`    ${f}${st.isDirectory() ? '/' : `  ${kb(st.size)}`}`);
+  }
+  const used = new Set(r?.databases || []);
+  for (const d of databases.filter((x) => used.has(x.name))) {
+    console.log(`  uses ${d.name}:`);
+    for (const t of d.tables.filter((t) => t.schema === 'main')) {
+      console.log(`    ${d.name}.main.${t.name} (${t.rows} rows): ${t.columns.map((c) => c.name).join(', ')}`);
+    }
+  }
+}
+
+if (!arg) { listReports(); console.log(); listData(false); }
+else if (arg === 'reports') listReports();
+else if (arg === 'data') listData(true);
+else showReport(arg.replace(/^\/?reports\//, '').replace(/\/$/, ''));

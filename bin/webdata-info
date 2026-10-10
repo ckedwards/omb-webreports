@@ -1,0 +1,44 @@
+#!/usr/bin/env node
+// webdata-info: where omb-webreports lives on this machine and whether it's
+// healthy. Agents run this first: ROOT and SITE below are what the docs and
+// skills mean by ROOT/... and SITE/....
+//
+//   webdata-info          paths, URL, versions, service status
+//   webdata-info --root   just the install directory
+//   webdata-info --site   just the site URL
+
+import { execFileSync } from 'node:child_process';
+import fs from 'node:fs';
+import path from 'node:path';
+
+import { ROOT, SITE_URL, OMB_DATA_DIR, NODE_MODULES_DIR, LISTEN_IP } from './_config.mjs';
+
+const arg = process.argv[2];
+if (arg === '--root') { console.log(ROOT); process.exit(0); }
+if (arg === '--site') { console.log(SITE_URL); process.exit(0); }
+
+const version = (mod) => { try { return JSON.parse(fs.readFileSync(path.join(NODE_MODULES_DIR, mod, 'package.json'), 'utf8')).version; } catch { return 'MISSING'; } };
+const active = (unit) => { try { return execFileSync('systemctl', ['is-active', unit], { encoding: 'utf8' }).trim(); } catch (e) { return (e.stdout || 'unknown').trim(); } };
+
+console.log(`omb-webreports
+  ROOT  ${ROOT}
+  SITE  ${SITE_URL}
+
+  READ_FIRST.md (agents start here)   ${path.join(ROOT, 'READ_FIRST.md')}
+  DESIGN.md (design system)           ${path.join(ROOT, 'DESIGN.md')}
+  reports                             ${path.join(ROOT, 'webroot', 'reports')}/<slug>/   → ${SITE_URL}/reports/<slug>/
+  design gallery (copy from it)       ${path.join(ROOT, 'webroot', 'reports', '_gallery', 'index.html')}   → ${SITE_URL}/reports/_gallery/
+  example report                      ${path.join(ROOT, 'examples', 'reports', 'blue-jays-2026', 'index.html')}
+  scheduled jobs                      ${path.join(ROOT, 'jobs')}/<name>/
+  published data                      ${path.join(ROOT, 'webroot', 'data')}/<bot>.duckdb
+  OpenMausBot data                    ${OMB_DATA_DIR}
+  Apache listens on                   ${LISTEN_IP}
+
+versions
+  openmausbot        ${version('openmausbot')}
+  @duckdb/node-api   ${version('@duckdb/node-api')}
+  @resvg/resvg-js    ${version('@resvg/resvg-js')}
+  node               ${process.versions.node}
+
+services
+${['openmausbot', 'apache2', 'webdata-sync', 'webdata-jobs'].map((u) => `  ${u.padEnd(18)} ${active(u)}`).join('\n')}`);

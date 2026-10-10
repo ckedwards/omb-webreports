@@ -1,0 +1,70 @@
+#!/usr/bin/env bash
+# webdata-check: render a report the way a phone would and report problems.
+#
+#   webdata-check <slug> [out-dir]
+#
+# Runs webdata-sync --once (report.json warnings), then opens the report over
+# the HTTPS URL in headless Chrome at iPhone size, in light and dark mode, and
+# prints: render time, kit status, kit error banner, page/console errors and
+# horizontal overflow. Saves full-page screenshots to out-dir (default: a temp
+# dir) as light.png and dark.png. Look at both screenshots before calling a
+# report done. Exit status 1 if any problem was found.
+set -uo pipefail
+
+ROOT=$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/.." && pwd)
+SITE=$(node --input-type=module -e "import('$ROOT/bin/_config.mjs').then((c) => console.log(c.SITE_URL))")
+slug=${1:-}; out=${2:-}
+[[ -n $slug ]] || { sed -n '2,11p' "$0" | sed 's/^# \{0,1\}//'; exit 2; }
+slug=${slug#/}; slug=${slug#reports/}; slug=${slug%/}
+[[ -d $ROOT/webroot/reports/$slug ]] || { echo "no report dir webroot/reports/$slug"; exit 2; }
+[[ -n $out ]] || out=$(mktemp -d "${TMPDIR:-/tmp}/webdata-check-$slug.XXXX")
+mkdir -p "$out"
+
+AB=$(ls -d "$HOME"/.openmausbot/tools/agent-browser/*/agent-browser 2>/dev/null | sort -V | tail -1)
+[[ -x $AB ]] || { echo "agent-browser not found under ~/.openmausbot/tools"; exit 2; }
+session="webdata-check-$$"
+ab() { "$AB" --session "$session" "$@"; }
+trap 'ab close >/dev/null 2>&1' EXIT
+
+problems=0
+echo "== sync"
+"$ROOT/bin/webdata-sync" --once | sed 's/^/  /' || problems=1
+
+url="$SITE/reports/$slug/"
+ab set device "iPhone 16 Pro" >/dev/null 2>&1
+for mode in light dark; do
+  echo "== $mode  $url"
+  ab set media "$mode" >/dev/null 2>&1
+  ab errors --clear >/dev/null 2>&1; ab console --clear >/dev/null 2>&1
+  ab open "$url" >/dev/null 2>&1 || { echo "  could not open page"; problems=1; continue; }
+  state=""
+  for _ in $(seq 1 120); do
+    state=$(ab eval 'performance.getEntriesByName("kit:rendered:initial").length ? "rendered" : (document.querySelector(".kit-error") ? "error" : (document.querySelector("[data-kit-status]")?.dataset.state || "none"))' 2>/dev/null | tr -d '"')
+    [[ $state == rendered || $state == error ]] && break
+    sleep 0.5
+  done
+  ab eval '(() => {
+    const m = performance.getEntriesByName("kit:rendered:initial")[0];
+    const engine = performance.getEntriesByName("kit:engine-start").length ? "engine started" : "from result cache";
+    const err = document.querySelector(".kit-error")?.textContent;
+    const over = document.documentElement.scrollWidth - document.documentElement.clientWidth;
+    return [
+      "  rendered: " + (m ? Math.round(m.startTime) + " ms (" + engine + ")" : "NO"),
+      "  status:   " + (document.querySelector("[data-kit-status]")?.textContent || "(no [data-kit-status])"),
+      err ? "  KIT ERROR: " + err : "",
+      over > 1 ? "  OVERFLOW: page is " + over + "px wider than the screen" : "",
+    ].filter(Boolean).join("\n");
+  })()' 2>/dev/null | sed -e 's/^"//' -e 's/"$//' -e 's/\\n/\n/g'
+  [[ $state == rendered ]] || problems=1
+  ab eval 'document.querySelector(".kit-error") ? "x" : ""' 2>/dev/null | grep -q x && problems=1
+  ab eval '(document.documentElement.scrollWidth - document.documentElement.clientWidth) > 1 ? "x" : ""' 2>/dev/null | grep -q x && problems=1
+  errs=$(ab errors 2>/dev/null | grep -v -e '^$' -e 'No page errors' -e '^✓')
+  cons=$(ab console 2>/dev/null | grep -iE '^\[?(error|warn)' )
+  [[ -n $errs ]] && { echo "  PAGE ERRORS:"; echo "$errs" | sed 's/^/    /'; problems=1; }
+  [[ -n $cons ]] && { echo "  CONSOLE:"; echo "$cons" | head -20 | sed 's/^/    /'; }
+  ab screenshot --full "$out/$mode.png" >/dev/null 2>&1 && echo "  screenshot: $out/$mode.png"
+done
+
+echo
+if (( problems )); then echo "PROBLEMS FOUND (see above)"; exit 1; fi
+echo "OK. Now look at $out/light.png and $out/dark.png."

@@ -1,0 +1,38 @@
+#!/usr/bin/env bash
+# Scaffold a new report from templates/report.
+#
+#   webdata-new-report <slug> "<Title>" <database> [description]
+#   webdata-new-report blue-jays-2026 "Blue Jays 2026" mybot "Season stats"
+#
+# Creates webroot/reports/<slug>/ with index.html (a working table explorer
+# to replace), report.json and an icon.svg, then runs a sync so it shows up.
+set -euo pipefail
+
+ROOT=$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/.." && pwd)
+slug=${1:-}; title=${2:-}; db=${3:-}; desc=${4:-}
+if [[ -z $slug || -z $title || -z $db ]]; then
+  sed -n '2,8p' "$0" | sed 's/^# \{0,1\}//'
+  exit 1
+fi
+[[ $slug =~ ^[a-z0-9][a-z0-9-]*$ ]] || { echo "slug must be lowercase-kebab-case"; exit 1; }
+[[ -e $ROOT/webroot/data/$db.duckdb ]] || {
+  echo "no database '$db' in webroot/data. Available:"; ls "$ROOT/webroot/data" | grep -E '\.duckdb$' | sed 's/\.duckdb$/  /'; exit 1; }
+dest=$ROOT/webroot/reports/$slug
+[[ -e $dest ]] && { echo "$dest already exists"; exit 1; }
+
+mkdir -p "$dest"
+TITLE=$title DB=$db node -e '
+  const fs = require("fs");
+  const esc = (s) => s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/"/g, "&quot;");
+  const html = fs.readFileSync(process.argv[1], "utf8")
+    .replaceAll("__TITLE__", esc(process.env.TITLE)).replaceAll("__DB__", process.env.DB);
+  fs.writeFileSync(process.argv[2], html);
+' "$ROOT/templates/report/index.html" "$dest/index.html"
+TITLE=$title DB=$db DESC=$desc node -e '
+  const meta = { title: process.env.TITLE, description: process.env.DESC, databases: [process.env.DB],
+    tags: [], theme_color: "#2a78d6", created: new Date().toISOString().slice(0, 10) };
+  require("fs").writeFileSync(process.argv[1], JSON.stringify(meta, null, 2) + "\n");
+' "$dest/report.json"
+
+"$ROOT/bin/webdata-sync" --once
+echo "created $dest -> /reports/$slug/"

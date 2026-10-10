@@ -1,0 +1,58 @@
+#!/usr/bin/env node
+// webdata-sql: run SQL against the published databases exactly as reports see them.
+//
+//   webdata-sql "SELECT * FROM mybot.main.team_record"
+//   webdata-sql --json "SELECT ..."        JSON rows instead of a text table
+//   webdata-sql --all "SELECT ..."         no 200-row display cap
+//
+// Every webroot/data/<name>.duckdb is attached read-only as <name>, so the
+// SQL is the same SQL a report runs in the browser (<name>.main.<table>).
+// The engine here is newer than the browser's DuckDB-WASM (1.4.x); stick to
+// mainstream SQL and confirm in the browser with webdata-check.
+
+import fs from 'node:fs';
+import path from 'node:path';
+import { pathToFileURL } from 'node:url';
+
+import { ROOT, NODE_MODULES_DIR } from './_config.mjs';
+const DATA = path.join(ROOT, 'webroot', 'data');
+const NODE_MODULES = NODE_MODULES_DIR;
+
+const args = process.argv.slice(2);
+const asJson = args.includes('--json');
+const all = args.includes('--all');
+const sql = args.filter((a) => !a.startsWith('--')).join(' ').trim();
+if (!sql) {
+  console.error('usage: webdata-sql [--json] [--all] "<SQL>"');
+  process.exit(2);
+}
+
+const { DuckDBInstance } = await import(pathToFileURL(path.join(NODE_MODULES, '@duckdb/node-api/lib/index.js')).href);
+const db = await DuckDBInstance.create(':memory:');
+const conn = await db.connect();
+for (const f of fs.readdirSync(DATA).filter((f) => f.endsWith('.duckdb') && !f.startsWith('.'))) {
+  const name = f.slice(0, -'.duckdb'.length).replace(/"/g, '""');
+  await conn.run(`ATTACH '${path.join(DATA, f).replace(/'/g, "''")}' AS "${name}" (READ_ONLY)`);
+}
+
+let result;
+try {
+  result = await conn.runAndReadAll(sql);
+} catch (e) {
+  console.error(e.message);
+  process.exit(1);
+}
+const rows = result.getRowObjectsJson();
+if (asJson) {
+  console.log(JSON.stringify(all ? rows : rows.slice(0, 200), null, 2));
+} else {
+  const cols = result.columnNames();
+  const shown = all ? rows : rows.slice(0, 200);
+  const cell = (v) => v == null ? 'NULL' : typeof v === 'object' ? JSON.stringify(v) : String(v);
+  const widths = cols.map((c) => Math.min(40, Math.max(c.length, ...shown.map((r) => cell(r[c]).length))));
+  const line = (vals) => vals.map((v, i) => v.slice(0, 40).padEnd(widths[i])).join('  ').trimEnd();
+  console.log(line(cols));
+  console.log(widths.map((w) => '-'.repeat(w)).join('  '));
+  for (const r of shown) console.log(line(cols.map((c) => cell(r[c]))));
+  console.log(`(${rows.length} row${rows.length === 1 ? '' : 's'}${shown.length < rows.length ? `, showing ${shown.length}; --all for all` : ''})`);
+}

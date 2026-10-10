@@ -1,0 +1,177 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<!-- first: reports JS errors to the server log (bin/webdata-errors) -->
+<script src="/lib/report-errors.js"></script>
+<title>Blue Jays 2026</title>
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-title" content="Jays 2026">
+<meta name="apple-mobile-web-app-status-bar-style" content="default">
+<meta name="theme-color" content="#f9f9f7" media="(prefers-color-scheme: light)">
+<meta name="theme-color" content="#0d0d0d" media="(prefers-color-scheme: dark)">
+<link rel="apple-touch-icon" href="icon-180.png">
+<link rel="manifest" href="manifest.webmanifest">
+<link rel="stylesheet" href="/lib/kit.css">
+<!-- DuckDB-WASM comes from jsDelivr: open the connection while the page parses. -->
+<link rel="preconnect" href="https://cdn.jsdelivr.net" crossorigin>
+<!-- webdata:modules: written by webdata-sync (versioned module URLs); do not edit -->
+<script type="importmap">{"imports":{"/lib/kit.js":"/lib/kit.js?v=0d0f4205c557"}}</script>
+<link rel="modulepreload" href="/lib/kit.js?v=0d0f4205c557">
+<!-- /webdata:modules -->
+<!-- defer: paint first; deferred scripts still run before the module below. -->
+<script defer src="/lib/vendor/d3.min.js"></script>
+<script defer src="/lib/vendor/plot.umd.min.js"></script>
+</head>
+<body>
+<header class="app-header">
+  <div class="inner">
+    <a class="back" href="/" aria-label="All reports">‹</a>
+    <div class="titles">
+      <h1>Blue Jays 2026</h1>
+      <div data-kit-status></div>
+    </div>
+  </div>
+</header>
+
+<main>
+  <section class="grid stats" id="stats" aria-label="Season totals"></section>
+
+  <section class="grid">
+    <article class="card">
+      <header><h2>Home run leaders</h2><p>Top 10</p></header>
+      <div id="hr"></div>
+    </article>
+    <article class="card">
+      <header><h2>On-base vs. slugging</h2><p>Hitters with 150+ AB</p></header>
+      <div id="obp-slg"></div>
+    </article>
+    <article class="card wide">
+      <header><h2>ERA by pitcher</h2><p>40+ innings · lower is better</p></header>
+      <div id="era-legend"></div>
+      <div id="era"></div>
+    </article>
+  </section>
+
+  <article class="card">
+    <header>
+      <div class="segmented" role="group" aria-label="Table" id="table-tabs">
+        <button data-value="batting" aria-pressed="true">Batting</button>
+        <button data-value="pitching">Pitching</button>
+      </div>
+      <p>Tap a column to sort</p>
+    </header>
+    <div id="batting"></div>
+    <div id="pitching" hidden></div>
+  </article>
+</main>
+
+<script type="module">
+import { report, chart, legend, table, stats, segmented, colors, fmt } from '/lib/kit.js';
+
+const T = 'bramble.main';
+const $ = (id) => document.getElementById(id);
+const lastName = (name) => name.split(' ').slice(1).join(' ') || name;
+const nb = (s) => String(s).replace(/-/g, '\u2011'); // keep "42-39" on one line
+
+segmented($('table-tabs'));
+
+report({
+  databases: ['bramble'],
+  async render(db) {
+    const c = colors();
+    const [record, batting, pitching] = await Promise.all([
+      db.query(`SELECT metric, value FROM ${T}.team_record`),
+      db.query(`SELECT * FROM ${T}.batting_stats ORDER BY AB DESC`),
+      db.query(`SELECT *, CASE WHEN coalesce(GS, 0) * 2 >= G THEN 'Starter' ELSE 'Reliever' END AS role
+                FROM ${T}.pitching_stats ORDER BY IP DESC`),
+    ]);
+    const team = Object.fromEntries(record.map((r) => [r.metric, r.value]));
+
+    // ---- Season totals
+    stats($('stats'), [
+      { label: 'Record', value: `${team.Wins}–${team.Losses}`, note: `${team.Division_Finish} · ${team.Games_Behind_Division_Leader} GB` },
+      { label: 'Win %', value: fmt.rate(+team.Win_Pct), note: `Home ${nb(team.Home_Record)} · Away ${nb(team.Away_Record)}` },
+      { label: 'Runs scored', value: fmt.num(+team.Team_Runs_Scored), note: `${fmt.num(+team.Team_Home_Runs)} home runs` },
+      { label: 'Batting', value: fmt.rate(+team.Team_Batting_Avg), note: `OBP ${fmt.rate(+team.Team_OBP)} · SLG ${fmt.rate(+team.Team_SLG)}` },
+      { label: 'Team ERA', value: fmt.num(+team.Team_ERA, 2), note: `${fmt.num(+team.Team_Strikeouts_Pitching)} strikeouts` },
+    ]);
+
+    // ---- Home run leaders: one series, value at the bar tip
+    const hr = batting.filter((d) => d.HR > 0).sort((a, b) => b.HR - a.HR).slice(0, 10);
+    chart($('hr'), {
+      height: hr.length * 28 + 8,
+      marginLeft: 130, marginRight: 28, marginTop: 4, marginBottom: 4,
+      x: { axis: null },
+      y: { label: null, domain: hr.map((d) => d.player), tickSize: 0 },
+      marks: [
+        Plot.barX(hr, { x: 'HR', y: 'player', fill: c.series[0], rx2: 4, insetTop: 4, insetBottom: 4,
+          tip: { format: { y: true, x: (v) => `${v} HR` } } }),
+        Plot.text(hr, { x: 'HR', y: 'player', text: 'HR', dx: 6, textAnchor: 'start', fill: c.ink2 }),
+        Plot.ruleX([0], { stroke: c.axis }),
+      ],
+    });
+
+    // ---- OBP vs SLG scatter: team line as reference, label the top 3 by OPS
+    const hitters = batting.filter((d) => d.AB >= 150 && d.OBP != null);
+    const top = [...hitters].sort((a, b) => b.OPS - a.OPS).slice(0, 3);
+    chart($('obp-slg'), {
+      height: 280, marginLeft: 44, marginRight: 16, inset: 12,
+      grid: true,
+      x: { label: 'On-base %', tickFormat: (d) => fmt.rate(d), ticks: 5 },
+      y: { label: 'Slugging %', tickFormat: (d) => fmt.rate(d), ticks: 5 },
+      marks: [
+        Plot.ruleX([+team.Team_OBP], { stroke: c.axis }),
+        Plot.ruleY([+team.Team_SLG], { stroke: c.axis }),
+        Plot.text([+team.Team_SLG], { y: (d) => d, frameAnchor: 'right', textAnchor: 'end', dy: -7,
+          text: () => `Team SLG ${fmt.rate(+team.Team_SLG)}`, fill: c.muted }),
+        Plot.text([+team.Team_OBP], { x: (d) => d, frameAnchor: 'bottom', textAnchor: 'start', dx: 4, dy: -4,
+          text: () => `Team OBP ${fmt.rate(+team.Team_OBP)}`, fill: c.muted }),
+        Plot.dot(hitters, { x: 'OBP', y: 'SLG', r: 5, fill: c.series[0], stroke: c.surface, strokeWidth: 2,
+          channels: { Player: 'player', OPS: 'OPS', AB: 'AB' },
+          tip: { format: { Player: true, OPS: (v) => fmt.rate(v), x: (v) => fmt.rate(v), y: (v) => fmt.rate(v), AB: true } } }),
+        Plot.text(top, { x: 'OBP', y: 'SLG', text: (d) => lastName(d.player), dy: -11, fill: c.ink2 }),
+      ],
+    });
+
+    // ---- ERA by pitcher, colored by role (fixed order: Starter = slot 1, Reliever = slot 2)
+    const roles = ['Starter', 'Reliever'];
+    const arms = pitching.filter((d) => d.IP >= 40).sort((a, b) => a.ERA - b.ERA);
+    legend($('era-legend'), roles.map((r, i) => ({ label: r, color: c.series[i] })));
+    const teamEra = +team.Team_ERA;
+    chart($('era'), {
+      height: arms.length * 26 + 30,
+      marginLeft: 130, marginRight: 36, marginTop: 24, marginBottom: 4,
+      x: { axis: null },
+      y: { label: null, domain: arms.map((d) => d.player), tickSize: 0 },
+      color: { domain: roles },
+      marks: [
+        Plot.barX(arms, { x: 'ERA', y: 'player', fill: 'role', rx2: 4, insetTop: 4, insetBottom: 4,
+          channels: { IP: 'IP' }, tip: { format: { y: true, fill: true, x: (v) => fmt.num(v, 2), IP: true } } }),
+        Plot.text(arms, { x: 'ERA', y: 'player', text: (d) => fmt.num(d.ERA, 2), dx: 6, textAnchor: 'start', fill: c.ink2 }),
+        Plot.ruleX([teamEra], { stroke: c.ink2, strokeWidth: 1 }),
+        Plot.text([teamEra], { x: (d) => d, frameAnchor: 'top', dy: -18, text: () => `Team ${fmt.num(teamEra, 2)}`, fill: c.ink2 }),
+        Plot.ruleX([0], { stroke: c.axis }),
+      ],
+    });
+
+    // ---- Tables (the table view twin of every chart)
+    const rate = (v) => fmt.rate(v);
+    table($('batting'), batting, [
+      { key: 'player', label: 'Player' }, { key: 'G' }, { key: 'AB' }, { key: 'R' }, { key: 'H' },
+      { key: 'HR' }, { key: 'RBI' }, { key: 'SB' }, { key: 'BB' }, { key: 'SO' },
+      { key: 'AVG', format: rate }, { key: 'OBP', format: rate }, { key: 'SLG', format: rate }, { key: 'OPS', format: rate },
+    ], { sort: 'OPS' });
+    table($('pitching'), pitching, [
+      { key: 'player', label: 'Player' }, { key: 'role', label: 'Role' }, { key: 'W' }, { key: 'L' },
+      { key: 'ERA', format: (v) => fmt.num(v, 2) }, { key: 'G' }, { key: 'GS' }, { key: 'SV' },
+      { key: 'IP', format: (v) => v?.toFixed(1) }, { key: 'SO' }, { key: 'BB' },
+      { key: 'WHIP', format: (v) => fmt.num(v, 2) }, { key: 'K9', label: 'K/9', format: (v) => fmt.num(v, 1) },
+    ], { sort: 'IP' });
+  },
+});
+</script>
+</body>
+</html>

@@ -1,0 +1,306 @@
+# READ_FIRST: omb-webreports for agents
+
+A static site of **reports**: small, self-contained web apps that read live
+data from OpenMausBot bots' DuckDB databases in the browser. Each report can be
+saved to an iPhone home screen as its own app. This file is for agents (and
+people) making or changing reports. Read it all before writing anything.
+
+**Run `webdata-info` first.** It prints `ROOT` (where this is installed) and
+`SITE` (the URL people open, usually `https://<machine>.<tailnet>.ts.net:8443`).
+Below, `ROOT/...` and `SITE/...` mean those. The `webdata-*` commands are on
+`PATH`. Apache serves `ROOT/webroot/` on the tailnet; no build step, no server
+code: everything is static files. Use SITE for links and home-screen apps.
+
+```
+ROOT/
+├── READ_FIRST.md        this file (CLAUDE.md, AGENTS.md link here)
+├── DESIGN.md            the design system: layout, tokens, components, chart recipes, words
+├── bin/                 tools, linked into /usr/local/bin
+│   ├── webdata-info     ROOT, SITE, versions, service status: start here
+│   ├── webdata-sync     snapshots, catalog, report index (runs as a service)
+│   ├── webdata-new-report  scaffold a report from templates/report
+│   ├── webdata-ls       list reports / databases / one report's details
+│   ├── webdata-sql      run SQL on the published databases (same names as reports)
+│   ├── webdata-check    render a report at iPhone size, light + dark: problems + screenshots
+│   ├── webdata-errors   JavaScript errors reported by real browsers/phones (lib/report-errors.js)
+│   ├── webdata-job      scheduled data jobs: new / run / list / logs / enable / notify-test / daemon
+│   └── webdata-browse   headless Chrome for job scripts: render a page, return HTML/text/JS result
+├── jobs/                scheduled data jobs: <name>/job.json + run.py (see "Scheduled data jobs")
+├── skills/              agent skills (SKILL.md only): read / create / update reports, data jobs
+├── templates/report/    starter report (a table explorer)
+├── examples/reports/    a complete real report to study (not served)
+├── admin/install.sh     system side: Apache, systemd units (sudo; people run it, not agents)
+├── config.env           this machine's settings (owner, IP, SITE, paths)
+├── sync.json            optional sync settings (see "Sync")
+├── .state/              sync bookkeeping (private, never served)
+└── webroot/             ← the only thing served
+    ├── index.html       front page: lists reports and databases (generated data, static page)
+    ├── lib/kit.js       shared runtime: DuckDB-WASM, live updates, charts, tables, formatting
+    ├── lib/kit.css      shared design tokens (light/dark) and components
+    ├── lib/vendor/      d3 7.9.0, Observable Plot 0.6.17 (pinned, local)
+    ├── data/            GENERATED: <name>.duckdb snapshots + catalog.json
+    └── reports/
+        ├── index.json   GENERATED: list of reports for the front page
+        └── <slug>/      one report = one directory = one home-screen app
+```
+
+## How data flows
+
+1. OpenMausBot bots keep their tables in `~/.openmausbot/bots/<id>/data.duckdb`.
+2. `webdata-sync` (systemd `webdata-sync.service`, polls every 3s) notices a
+   change and writes a consistent snapshot to `webroot/data/<bot-name>.duckdb`
+   (lowercased bot name, e.g. MyBot → `mybot`). It never opens the bot's live
+   file: it copies it (+WAL) aside first, then writes a fresh database with
+   `STORAGE_VERSION 'v1.2.0', BLOCK_SIZE 16384`. The storage version is one the
+   browser's DuckDB-WASM (engine 1.4.x) reads although the bot runs a newer DuckDB;
+   16 KB blocks stop every tiny table padding out to 256 KB (MyBot: 3.4 MB → 240 KB).
+   Apache then serves it brotli/gzip-compressed (MyBot: ~8 KB on the wire).
+3. It also writes `webroot/data/catalog.json`: every database, its tables,
+   columns, types and row counts. **Read the catalog to learn the schema**:
+   `cat ROOT/webroot/data/catalog.json`
+4. A report attaches the `.duckdb` file over HTTP with DuckDB-WASM and runs SQL.
+   One hop: bot → snapshot → browser.
+5. Freshness is **ETag-based**: data files keep plain URLs. Apache sends
+   `Cache-Control: no-cache` for everything, so browsers always revalidate
+   (cheap `304`). `kit.js` polls `HEAD` on each attached database every 15s
+   while the page is visible (and on return to the page); a new ETag →
+   re-attach → `render()` runs again. A changed report `index.html` reloads the page.
+
+So: **when a bot's data changes, every open report updates itself within ~20s.**
+Nothing to deploy.
+
+Schemas: `main` holds the bot's own tables, which are the ones to use. `omb_results`
+holds the bot's cached sheet-card query results (`c_1`, `c_2`, …); avoid them.
+
+You may also drop your own `*.duckdb` or `*.parquet` file into `webroot/data/`
+(write to a dotfile name, then `mv` into place so it's atomic). The sync adds it to
+the catalog. The `kit.js` `databases:` option attaches `.duckdb` files only;
+for a parquet file query `read_parquet('<absolute URL>')` directly.
+
+## Making a report
+
+```bash
+webdata-new-report <slug> "<Title>" <database> "<one-line description>"
+# e.g.
+webdata-new-report jays-pitching "Jays Pitching" mybot "Starters vs. bullpen"
+```
+
+That creates `webroot/reports/<slug>/` with a working table explorer.
+Replace the body with the real report. **Read `ROOT/DESIGN.md` first**
+(how reports look and read), then use the live references:
+`webroot/reports/_gallery/` (every component and chart form, one copyable
+function each; SITE/reports/_gallery/) and
+`examples/reports/blue-jays-2026/` (a complete real report).
+
+A report directory:
+
+| File | Who writes it | Purpose |
+|---|---|---|
+| `index.html` | you | the app: one self-contained file, inline `<style>`/`<script type="module">` |
+| `report.json` | you | metadata (below) |
+| `icon.svg` | you (optional) | 512×512 square, full-bleed background, no transparency, no rounded corners (iOS rounds them). Generated from the title's initials if missing. |
+| `icon-180.png`, `icon-512.png` | sync | rendered from `icon.svg` |
+| `manifest.webmanifest` | sync | from `report.json`; makes it an installable standalone app scoped to its dir |
+
+`report.json`:
+
+```json
+{
+  "title": "Blue Jays 2026",
+  "short_name": "Jays 2026",
+  "description": "One or two sentences; shown on the front page.",
+  "databases": ["mybot"],
+  "tags": ["baseball"],
+  "theme_color": "#134a8e",
+  "created": "2026-10-10"
+}
+```
+
+`title` is required; `short_name` is the home-screen label (≤ ~12 chars);
+`databases` must name files in `webroot/data/` (without `.duckdb`).
+
+After creating or changing a report, run **`webdata-check <slug>`**.
+It runs a sync pass (warnings for a bad `report.json`, unknown database, …),
+renders the report over HTTPS at iPhone size in light and dark mode, prints
+kit errors, page errors and horizontal overflow, saves `light.png` / `dark.png`,
+and exits 1 on any problem. Then look at both screenshots.
+
+Exploring data: `webdata-ls` (what exists), `webdata-ls data`
+(all columns), `webdata-sql "<SQL>"` (same `<db>.main.<table>` names as in reports).
+
+### Rules for reports
+
+- **Self-contained**: everything specific to the report lives in its directory.
+  Shared code comes only from `/lib/` (kit, vendored d3/Plot) and DuckDB-WASM
+  (loaded by kit from jsDelivr, pinned). No other CDNs, no build tools, no npm.
+- **Read-only**: the server accepts only GET/HEAD. Reports can't save anything
+  server-side; per-viewer preferences may use `localStorage` (wrap in try/catch).
+- **Mobile first**: test at ~390px wide. No horizontal page scroll (wide tables
+  scroll inside `.table-wrap`, which `table()` adds). Keep the `<head>` meta tags
+  from the template: they make the home-screen app work (standalone,
+  safe-area insets, icon, title).
+- **Light and dark**: use kit.css tokens (`var(--ink)`, `var(--surface)`, …),
+  never hard-coded colors. In charts use `colors()` from kit (resolved values).
+- **Untrusted text**: data values go in with `textContent` (kit's `table()` and
+  `legend()` already do). Never build HTML from data with `innerHTML`.
+- **Idempotent `render()`**: it runs on load, data change, theme change and
+  resize. Always `replaceChildren`, never append.
+- Paths: absolute for shared things (`/lib/kit.js`, `/data/…`), relative for
+  the report's own files (`icon-180.png`, `manifest.webmanifest`).
+- **Keep the `<!-- webdata:modules -->` block** in `<head>` (from the template)
+  and never edit it. The sync writes an import map there that points
+  `/lib/kit.js` at a content-versioned URL (`/lib/kit.js?v=<hash>`), because
+  Safari can run a cached ES module without revalidating it; a page without the
+  block can break on iPhones after a kit change (`webdata-sync` warns about it).
+  Keep importing `'/lib/kit.js'` as usual; the map does the rest.
+- **Keep `<script src="/lib/report-errors.js">`** first in `<head>`: it reports
+  JavaScript errors from real devices to the server log. Read them with
+  `webdata-errors` (e.g. when someone says a page is broken on their phone).
+- Directory names: lowercase-kebab-case. A dir starting with `_` or `.` is ignored
+  (use `_draft-…` while working on something).
+
+## kit.js API
+
+```js
+import { report, query, chart, legend, table, stats, stat, segmented, empty,
+         colors, fmt, getJSON, watch } from '/lib/kit.js';
+
+const app = report({
+  databases: ['mybot'],          // ATTACH /data/mybot.duckdb AS mybot (READ_ONLY)
+  async render(db, { reason }) {   // reason: 'initial' | 'data' | 'theme' | 'resize' | 'input'
+    const rows = await db.query(`SELECT player, HR FROM mybot.main.batting_stats ORDER BY HR DESC`);
+    // rows: array of plain objects; BIGINT/HUGEINT/DECIMAL → Number, DATE/TIMESTAMP → Date
+  },
+});
+someSelect.onchange = () => app.redraw();   // re-render after a control changes
+```
+
+- `report()` also fills `<div data-kit-status>` ("Data updated 3 min ago"),
+  shows errors in a banner, and dims `<main>` while re-rendering.
+- **Result cache.** `db.query()` results are cached in IndexedDB, keyed by
+  page + SQL + the current ETag of every database. A revisit with unchanged
+  data renders from the cache (~0.1s) and never starts DuckDB-WASM (~1–1.5s even
+  when its files are cached). New data means a new ETag, which means a cache miss
+  and a real query, so the cache can't serve stale data. The engine starts on the
+  first tap/keypress so a control that needs a fresh query is quick. Consequences:
+  - SQL whose result isn't determined by the databases alone (`now()`,
+    `random()`, `read_parquet` of another URL) must use `db.query(sql, { cache: false })`.
+  - Rows are fresh copies on every call (safe to sort/mutate). Keep queries
+    deterministic (`ORDER BY` when order matters) so a cached result equals a live one.
+  - Load timing is marked: `performance.getEntriesByType('mark')`
+    (`kit:engine-*`, `kit:attached:*`, `kit:rendered:*`).
+- Qualify tables as `<database>.main.<table>`.
+- `chart(el, plotOptions)`: Observable Plot with house style and the
+  categorical palette as the default color range; width = element width.
+  Needs the two vendor `<script>` tags in `<head>` (see template).
+- `legend(el, [{label, color, line?}])`: for ≥ 2 series.
+- `stats(el, [{label, value, note?, delta?}])` / `stat({...})`: stat tiles;
+  `delta: { text, direction: 'up'|'down'|'flat', good: true|false|null }`.
+- `segmented(groupEl, { onChange })`: `.segmented` tabs (panels by id) or filters;
+  returns `{ value }`.
+- `empty(el, text)`: empty-state message.
+- `table(el, rows, [{key, label?, format?, numeric?}], {sort, desc})`:
+  sortable, numbers right-aligned in tabular figures, nulls sort last.
+- `fmt.num(n, digits?)`, `fmt.compact` (12.9K), `fmt.pct` (0.488 → 48.8%),
+  `fmt.rate` (.262), `fmt.date`, `fmt.datetime`, `fmt.ago`.
+- `watch(urls, onChange)`, `getJSON(url)`: for pages that read JSON
+  (the front page uses these).
+
+kit.css components: `.app-header` (sticky, notch-safe), `main`, `.grid`,
+`.grid.stats`, `.card` (+ `header h2` / `header p`), `.stat`, `.wide` (span
+full row), `.filters`, `.segmented`, `table.data`, `.legend`, `.empty`,
+`.muted`, `.secondary`, `.num`. Tokens and usage: DESIGN.md §3–5.
+
+## Chart rules
+
+Chart forms, colors, marks, labels, sizing and recipes are in **DESIGN.md §6**,
+with every form rendered in the gallery. The non-negotiables: pick the form
+first (one number → a stat tile), never a dual axis, series colors in fixed
+order pinned by `color: { domain }`, status colors only for state, thin marks,
+selective labels, tips on every chart, the numbers also in a table, and look
+at the result in light **and** dark (`webdata-check` saves both).
+
+## Sync
+
+`bin/webdata-sync --once` runs one pass; `--watch` is what the service runs.
+Logs: `journalctl -u webdata-sync -f`. Optional `ROOT/sync.json`:
+
+```json
+{ "exclude_bots": ["Otto"], "poll_seconds": 3 }
+```
+
+`exclude_bots` takes names or ids; nothing from those bots is published
+(delete an already-published `webroot/data/<name>.duckdb` by hand).
+Everything in `webroot/` is readable by every device on the tailnet.
+
+Generated files (`data/*`, `reports/index.json`, report manifests and PNG icons)
+are rewritten only when their content changes. Don't edit them by hand.
+
+## Gotchas
+
+- The browser downloads the whole `.duckdb` on attach, compressed (MyBot: ~8 KB),
+  and revalidates it with its ETag after that (`304`, no body). Fine for bot-sized
+  data; for a large dataset, publish a trimmed `*.parquet`/`.duckdb` built for the
+  report instead. Range requests are served uncompressed on purpose.
+- Compressed responses keep the file's plain ETag (`BrotliAlterETag NoChange`), so
+  `304`s work.
+- First load of any report fetches the DuckDB-WASM engine (~7 MB compressed, from
+  jsDelivr; cached afterwards) and compiles it (~1s). Revisits with unchanged data
+  skip the engine entirely (result cache). Keep the template's `<head>`:
+  `preconnect` to jsDelivr, `modulepreload` of kit, `defer` on d3/Plot.
+- `GET …/<name>.duckdb.wal 404` in the access log is normal: DuckDB checks for a WAL.
+- No offline mode: kit doesn't use service workers, so home-screen apps need the
+  tailnet to load. (Over the HTTPS URL a report *could* register one; don't
+  without asking, since it would fight the ETag freshness model.)
+- The HTTPS proxy is Tailscale config, not Apache: `tailscale serve status`;
+  remove with `tailscale serve --https=8443 off`.
+- Changing anything in `admin/` does nothing until someone runs
+  `sudo bash ROOT/admin/install.sh`.
+
+## Scheduled data jobs
+
+Deterministic refreshes of a bot's tables, with no AI at run time.
+`jobs/<name>/job.json` names the bot, a cron `schedule` + IANA `timezone`, the
+tables (`replace`, `append`, or `upsert` with a `key`) and `enabled`; `run.py`
+(or `run.mjs`/`run.sh`) writes one file per table to `$WEBDATA_OUT`.
+`webdata-jobs.service` runs `bin/webdata-job daemon`, checks every minute, and
+for each due job: runs the script (timeout, logs) → stages and validates every
+table (row counts, unique keys, columns unchanged vs the current table) → waits
+until OpenMausBot isn't holding the bot's database (it keeps it open 10 min after
+use; DuckDB allows one writer) → applies everything in one transaction
+(milliseconds) with the same DuckDB build OpenMausBot uses. Any failure writes
+nothing. The sync then republishes the snapshot, so reports update on their own.
+
+```bash
+webdata-job list                 # status + next runs
+webdata-job run <name> --dry-run # collect + validate, write nothing
+webdata-job logs <name>
+journalctl -u webdata-jobs -n 50               # the scheduler
+```
+
+State and logs: `.state/jobs/<name>/` (last 30 runs). Secrets: `jobs/<name>/.env`
+(git-ignored). Jobs run sandboxed: only `ROOT`, the bots' database folders and
+a private `/tmp` are writable (home is read-only), so scripts use the Python standard
+library or Node built-ins. Pages that need JavaScript: `bin/webdata-browse`
+(headless Chrome, fresh profile per call, works in the sandbox).
+
+Failure notifications: `jobs/.notify.env` (chmod 600, git-ignored) maps a bot to an
+OpenMausBot webhook URL (`MyBot=http://127.0.0.1:8800/hooks/wh_.../whsec_...`).
+A failed *scheduled* run POSTs `{event: "webdata.job.failed", job, error, log_tail, ...}`
+there (first failure, then at most daily), which starts a bot task to fix it.
+`webdata-job notify-test <bot>` checks the wiring. Tests of the runner must set
+`WEBDATA_JOBS_DIR`/`WEBDATA_JOBS_STATE` (and `OMB_DATA_DIR`) to scratch folders:
+the live service watches `jobs/`.
+The `webdata-data-job` skill is the full procedure. An OpenMausBot *routine* is the
+alternative when collection needs judgment (it re-runs the bot, with AI).
+
+## Skills for bots
+
+`skills/` holds four agent skills in the open SKILL.md format, kept SKILL.md-only
+because OpenMausBot imports nothing else: `webdata-reports-read`,
+`webdata-report-create`, `webdata-report-update`, `webdata-data-job`. They call the `bin/` helpers
+above. The copies in this repo are the source of truth; a bot's enabled copy is
+whatever was confirmed in the OpenMausBot app, so after editing one here, have
+the bot update its learned skill of the same name.
+
+For people (setup, operations, architecture): `README.md` and `docs/`.

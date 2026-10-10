@@ -1,0 +1,443 @@
+#!/usr/bin/env node
+// webdata-sync: keeps ROOT/webroot in step with its sources.
+//
+//   - snapshots each OpenMausBot bot's data.duckdb to webroot/data/<bot>.duckdb
+//     (consistent copy, WAL folded in, compact format DuckDB-WASM can read)
+//   - writes webroot/data/catalog.json: every database in webroot/data, its
+//     tables, columns and row counts
+//   - for the front page and each report dir: renders icon.svg to PNGs and
+//     writes manifest.webmanifest from report.json
+//   - writes webroot/reports/index.json for the front page
+//
+// Usage: webdata-sync [--once]   one pass, print warnings, exit 2 if any
+//        webdata-sync --watch    poll for changes forever (webdata-sync.service)
+//
+// Generated files are only rewritten when their content changes, so their
+// mtime/ETag only moves when something real changed.
+
+import crypto from 'node:crypto';
+import fs from 'node:fs';
+import { createRequire } from 'node:module';
+import path from 'node:path';
+import { pathToFileURL } from 'node:url';
+
+import { ROOT, OMB_DATA_DIR, NODE_MODULES_DIR } from './_config.mjs';
+const WEB = path.join(ROOT, 'webroot');
+const DATA = path.join(WEB, 'data');
+const REPORTS = path.join(WEB, 'reports');
+const STATE_DIR = path.join(ROOT, '.state');
+const STATE_FILE = path.join(STATE_DIR, 'sync-state.json');
+const LOCK = path.join(STATE_DIR, 'lock');
+const OMB = OMB_DATA_DIR;
+const NODE_MODULES = NODE_MODULES_DIR;
+
+// Snapshot format. DuckDB-WASM in reports (kit.js) bundles an older engine
+// (1.4.x) than the bot, so the storage version is pinned to one it reads.
+// 16 KB blocks instead of the default 256 KB: bot tables are tiny, and each
+// table otherwise pads to whole 256 KB blocks (3.4 MB -> 240 KB for MyBot;
+// ~8 KB on the wire with Apache's brotli). BLOCK_SIZE needs storage >= v1.2.0.
+const SNAPSHOT_FORMAT = "STORAGE_VERSION 'v1.2.0', BLOCK_SIZE 16384";
+const GENERATED = new Set(['manifest.webmanifest', 'icon-180.png', 'icon-512.png']);
+
+const config = {
+  exclude_bots: [],   // bot names or ids not to publish
+  poll_seconds: 3,
+  ...readJSON(path.join(ROOT, 'sync.json'), {}),
+};
+
+const log = (...a) => console.log(new Date().toISOString(), ...a);
+let warnings = [];
+const warn = (msg) => { warnings.push(msg); log('warning:', msg); };
+
+// ---------------------------------------------------------------- helpers
+
+function readJSON(file, fallback) {
+  try { return JSON.parse(fs.readFileSync(file, 'utf8')); } catch { return fallback; }
+}
+
+function statSig(file) {
+  try { const s = fs.statSync(file); return `${s.size}:${s.mtimeMs}`; } catch { return '-'; }
+}
+
+/** Write only if content differs; atomic via a dotfile temp (never served). */
+function writeIfChanged(file, content) {
+  const buf = Buffer.isBuffer(content) ? content : Buffer.from(content);
+  try { if (fs.readFileSync(file).equals(buf)) return false; } catch {}
+  const tmp = path.join(path.dirname(file), `.tmp-${path.basename(file)}-${process.pid}`);
+  fs.writeFileSync(tmp, buf);
+  fs.renameSync(tmp, file);
+  return true;
+}
+
+const json = (obj) => JSON.stringify(obj, null, 2) + '\n';
+const hash = (s) => crypto.createHash('sha1').update(s).digest('hex').slice(0, 12);
+const slugify = (s) => String(s).toLowerCase().normalize('NFKD').replace(/[^\w\s-]/g, '')
+  .trim().replace(/[\s_-]+/g, '-').replace(/^-+|-+$/g, '') || 'db';
+const sqlString = (s) => `'${String(s).replace(/'/g, "''")}'`;
+
+function acquireLock(waitMs) {
+  const deadline = Date.now() + waitMs;
+  for (;;) {
+    try { fs.writeFileSync(LOCK, String(process.pid), { flag: 'wx' }); return true; } catch {}
+    const pid = Number(readJSON(LOCK, 0));
+    let alive = false;
+    try { if (pid) { process.kill(pid, 0); alive = true; } } catch {}
+    if (!alive) { fs.rmSync(LOCK, { force: true }); continue; }
+    if (Date.now() > deadline) return false;
+    Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 200);
+  }
+}
+const releaseLock = () => fs.rmSync(LOCK, { force: true });
+
+// ---------------------------------------------------------------- duckdb
+
+let duck;
+async function duckdb() {
+  if (!duck) {
+    const { DuckDBInstance } = await import(
+      pathToFileURL(path.join(NODE_MODULES, '@duckdb/node-api/lib/index.js')).href);
+    const instance = await DuckDBInstance.create(':memory:');
+    const conn = await instance.connect();
+    duck = {
+      run: (sql) => conn.run(sql),
+      rows: async (sql) => (await conn.runAndReadAll(sql)).getRowObjectsJson(),
+    };
+  }
+  return duck;
+}
+
+// ---------------------------------------------------------------- sources
+
+function listBots() {
+  const bots = readJSON(path.join(OMB, 'bots.json'), []);
+  const list = Array.isArray(bots) ? bots : Object.values(bots);
+  const taken = new Set();
+  const out = [];
+  for (const b of list) {
+    if (!b?.id) continue;
+    const db = path.join(OMB, 'bots', b.id, 'data.duckdb');
+    if (!fs.existsSync(db)) continue;
+    if (config.exclude_bots.includes(b.id) || config.exclude_bots.includes(b.name)) continue;
+    let slug = slugify(b.name || b.id);
+    if (taken.has(slug)) slug = `${slug}-${b.id.slice(0, 8)}`;
+    taken.add(slug);
+    out.push({ id: b.id, name: b.name || b.id, slug, db });
+  }
+  return out;
+}
+
+/** Copy the bot's live DB (+WAL) aside, then COPY FROM DATABASE into a fresh
+ *  pinned-storage file. The bot's own files are only ever read with cp. */
+async function snapshotBot(bot, state) {
+  const out = path.join(DATA, `${bot.slug}.duckdb`);
+  const sig = `${statSig(bot.db)}|${statSig(bot.db + '.wal')}`;
+  const prev = state.bots[bot.id];
+  if (prev?.sig === sig && prev?.slug === bot.slug && prev?.format === SNAPSHOT_FORMAT && fs.existsSync(out)) return;
+
+  const tmp = fs.mkdtempSync(path.join(STATE_DIR, 'snap-'));
+  try {
+    const src = path.join(tmp, 'src.duckdb');
+    fs.copyFileSync(bot.db, src);
+    if (fs.existsSync(bot.db + '.wal')) fs.copyFileSync(bot.db + '.wal', src + '.wal');
+    if (`${statSig(bot.db)}|${statSig(bot.db + '.wal')}` !== sig) {
+      log(`${bot.name}: database changed while copying; retrying next pass`);
+      return;
+    }
+    // Built inside data/ (as a dotfile, never served) so it inherits the
+    // webroot's default ACL, then renamed over the old snapshot atomically.
+    const dst = path.join(DATA, `.tmp-${bot.slug}.duckdb`);
+    fs.rmSync(dst, { force: true });
+    fs.rmSync(dst + '.wal', { force: true });
+    const d = await duckdb();
+    await d.run(`ATTACH ${sqlString(src)} AS snap_src`);
+    try {
+      await d.run(`ATTACH ${sqlString(dst)} AS snap_dst (${SNAPSHOT_FORMAT})`);
+      await d.run('COPY FROM DATABASE snap_src TO snap_dst');
+      await d.run('DETACH snap_dst');
+    } finally {
+      await d.run('DETACH snap_src');
+    }
+    fs.renameSync(dst, out);
+    state.bots[bot.id] = { sig, slug: bot.slug, format: SNAPSHOT_FORMAT };
+    log(`${bot.name}: snapshot -> data/${bot.slug}.duckdb`);
+  } catch (e) {
+    warn(`${bot.name}: snapshot failed: ${e.message}`);
+  } finally {
+    fs.rmSync(tmp, { recursive: true, force: true });
+  }
+}
+
+// ---------------------------------------------------------------- catalog
+
+async function describeFile(file) {
+  const d = await duckdb();
+  const ext = path.extname(file);
+  if (ext === '.parquet') {
+    const cols = await d.rows(`DESCRIBE SELECT * FROM read_parquet(${sqlString(file)})`);
+    const [{ n }] = await d.rows(`SELECT count(*)::BIGINT AS n FROM read_parquet(${sqlString(file)})`);
+    return [{ schema: null, name: path.basename(file, ext), type: 'table', rows: Number(n),
+      columns: cols.map((c) => ({ name: c.column_name, type: c.column_type })) }];
+  }
+  await d.run(`ATTACH ${sqlString(file)} AS cat_db (READ_ONLY)`);
+  try {
+    const rels = await d.rows(`
+      SELECT * FROM (
+        SELECT schema_name AS schema, table_name AS name, 'table' AS type FROM duckdb_tables() WHERE database_name = 'cat_db'
+        UNION ALL
+        SELECT schema_name, view_name, 'view' FROM duckdb_views() WHERE database_name = 'cat_db' AND NOT internal
+      ) ORDER BY schema <> 'main', schema, name`);
+    const cols = await d.rows(`
+      SELECT schema_name AS schema, table_name AS name, column_name, data_type
+      FROM duckdb_columns() WHERE database_name = 'cat_db' ORDER BY column_index`);
+    for (const r of rels) {
+      r.columns = cols.filter((c) => c.schema === r.schema && c.name === r.name)
+        .map((c) => ({ name: c.column_name, type: c.data_type }));
+      if (r.type === 'table') {
+        const [{ n }] = await d.rows(`SELECT count(*)::BIGINT AS n FROM cat_db."${r.schema.replace(/"/g, '""')}"."${r.name.replace(/"/g, '""')}"`);
+        r.rows = Number(n);
+      }
+    }
+    return rels;
+  } finally {
+    await d.run('DETACH cat_db');
+  }
+}
+
+async function buildCatalog(bots, state) {
+  const bySlug = new Map(bots.map((b) => [b.slug, b]));
+  const entries = [];
+  const files = fs.readdirSync(DATA).filter((f) => !f.startsWith('.') && /\.(duckdb|parquet)$/.test(f)).sort();
+  const seen = {};
+  for (const f of files) {
+    const file = path.join(DATA, f);
+    const st = fs.statSync(file);
+    const sig = `${st.size}:${st.mtimeMs}`;
+    let tables = state.catalog[f]?.sig === sig ? state.catalog[f].tables : null;
+    if (!tables) {
+      try { tables = await describeFile(file); } catch (e) { warn(`data/${f}: cannot read: ${e.message}`); continue; }
+    }
+    seen[f] = { sig, tables };
+    const name = f.replace(/\.(duckdb|parquet)$/, '');
+    const bot = f.endsWith('.duckdb') ? bySlug.get(name) : null;
+    entries.push({
+      name,
+      url: `/data/${f}`,
+      format: path.extname(f).slice(1),
+      bytes: st.size,
+      updated: new Date(st.mtimeMs).toISOString(),
+      source: bot ? { type: 'openmausbot', bot: bot.name, id: bot.id } : { type: 'file' },
+      tables,
+    });
+  }
+  state.catalog = seen;
+  writeIfChanged(path.join(DATA, 'catalog.json'), json({ databases: entries }));
+  return entries;
+}
+
+// ---------------------------------------------------------------- reports
+
+let resvg;
+function renderPng(svg, size) {
+  resvg ??= createRequire(import.meta.url)(path.join(NODE_MODULES, '@resvg/resvg-js'));
+  return new resvg.Resvg(svg, { fitTo: { mode: 'width', value: size } }).render().asPng();
+}
+
+function defaultIcon(title, color) {
+  const initials = title.split(/\s+/).filter((w) => /[\p{L}\p{N}]/u.test(w)).slice(0, 2)
+    .map((w) => [...w][0].toUpperCase()).join('') || '?';
+  return `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512">
+  <rect width="512" height="512" fill="${color}"/>
+  <text x="256" y="256" dy=".35em" text-anchor="middle" font-family="DejaVu Sans, sans-serif"
+        font-weight="700" font-size="${initials.length > 1 ? 200 : 260}" fill="#ffffff">${initials}</text>
+</svg>
+`;
+}
+
+/** Icons + manifest for one app dir (a report, or the webroot itself). */
+function buildApp(dir, meta, id) {
+  const svgFile = path.join(dir, 'icon.svg');
+  if (!fs.existsSync(svgFile)) writeIfChanged(svgFile, defaultIcon(meta.title, meta.theme_color));
+  const svg = fs.readFileSync(svgFile);
+  const svgM = fs.statSync(svgFile).mtimeMs;
+  for (const size of [180, 512]) {
+    const png = path.join(dir, `icon-${size}.png`);
+    let pngM = -1;
+    try { pngM = fs.statSync(png).mtimeMs; } catch {}
+    if (pngM < svgM) {
+      try { writeIfChanged(png, renderPng(svg, size)); } catch (e) { warn(`${id}icon.svg: ${e.message}`); }
+    }
+  }
+  writeIfChanged(path.join(dir, 'manifest.webmanifest'), json({
+    id,
+    name: meta.title,
+    short_name: meta.short_name || meta.title.slice(0, 14),
+    description: meta.description || '',
+    start_url: './',
+    scope: './',
+    display: 'standalone',
+    background_color: meta.background_color || '#f9f9f7',
+    theme_color: meta.theme_color,
+    icons: [
+      { src: 'icon-180.png', sizes: '180x180', type: 'image/png' },
+      { src: 'icon-512.png', sizes: '512x512', type: 'image/png', purpose: 'any' },
+    ],
+  }));
+}
+
+/** Latest mtime of the report's own (non-generated) files. */
+function lastModified(dir, depth = 0) {
+  let latest = 0;
+  for (const e of fs.readdirSync(dir, { withFileTypes: true })) {
+    if (e.name.startsWith('.') || GENERATED.has(e.name)) continue;
+    const p = path.join(dir, e.name);
+    if (e.isDirectory()) { if (depth < 3) latest = Math.max(latest, lastModified(p, depth + 1)); }
+    else if (e.isFile()) latest = Math.max(latest, fs.statSync(p).mtimeMs);
+  }
+  return latest;
+}
+
+function buildReports(catalog) {
+  const dbs = new Map(catalog.map((d) => [d.name, d]));
+  const reports = [];
+  const dirs = fs.readdirSync(REPORTS, { withFileTypes: true })
+    .filter((e) => e.isDirectory() && !/^[._]/.test(e.name)).map((e) => e.name).sort();
+  for (const slug of dirs) {
+    const dir = path.join(REPORTS, slug);
+    const id = `/reports/${slug}/`;
+    if (!/^[a-z0-9][a-z0-9-]*$/.test(slug)) warn(`${id}: dir name should be lowercase-kebab-case`);
+    if (!fs.existsSync(path.join(dir, 'index.html'))) { warn(`${id}: missing index.html, skipped`); continue; }
+    const meta = readJSON(path.join(dir, 'report.json'), null);
+    if (!meta || typeof meta.title !== 'string') { warn(`${id}: report.json missing or has no "title", skipped`); continue; }
+    meta.theme_color ||= '#2a78d6';
+    meta.databases = Array.isArray(meta.databases) ? meta.databases : [];
+    for (const name of meta.databases) if (!dbs.has(name)) warn(`${id}: report.json lists unknown database "${name}"`);
+    buildApp(dir, meta, id);
+    const dataUpdated = meta.databases.map((n) => dbs.get(n)?.updated).filter(Boolean).sort().pop() || null;
+    reports.push({
+      slug,
+      url: id,
+      title: meta.title,
+      description: meta.description || '',
+      tags: Array.isArray(meta.tags) ? meta.tags : [],
+      theme_color: meta.theme_color,
+      icon: `${id}icon-180.png`,
+      databases: meta.databases,
+      updated: new Date(lastModified(dir)).toISOString(),
+      data_updated: dataUpdated,
+    });
+  }
+  reports.sort((a, b) => (b.data_updated || b.updated).localeCompare(a.data_updated || a.updated));
+  writeIfChanged(path.join(REPORTS, 'index.json'), json({ reports }));
+
+  const home = readJSON(path.join(WEB, 'report.json'), { title: 'Reports' });
+  home.theme_color ||= '#2a78d6';
+  buildApp(WEB, home, '/');
+  return reports;
+}
+
+// ---------------------------------------------------------------- module versions
+//
+// Safari can run a cached ES module without revalidating it, even with
+// Cache-Control: no-cache (it did, and a report broke on a phone when kit.js
+// gained an export). Pages are always revalidated, so each page carries a
+// managed block with an import map pointing every shared module at a
+// content-versioned URL: a changed module has a new URL and can't be served
+// stale. Rewriting the block also changes the page's ETag, so open pages reload.
+
+const MODULES = ['kit.js'];   // ES modules in webroot/lib imported by pages
+const BLOCK = /<!-- webdata:modules[^>]*-->[\s\S]*?<!-- \/webdata:modules -->/;
+
+function modulesBlock() {
+  const imports = {};
+  for (const m of MODULES) {
+    imports[`/lib/${m}`] = `/lib/${m}?v=${hash(fs.readFileSync(path.join(WEB, 'lib', m)))}`;
+  }
+  return [
+    '<!-- webdata:modules: written by webdata-sync (versioned module URLs); do not edit -->',
+    `<script type="importmap">${JSON.stringify({ imports })}</script>`,
+    ...Object.values(imports).map((u) => `<link rel="modulepreload" href="${u}">`),
+    '<!-- /webdata:modules -->',
+  ].join('\n');
+}
+
+function stampPages() {
+  const block = modulesBlock();
+  const pages = [path.join(WEB, 'index.html'), path.join(ROOT, 'templates', 'report', 'index.html')];
+  for (const e of fs.readdirSync(REPORTS, { withFileTypes: true })) {
+    if (e.isDirectory() && !e.name.startsWith('.')) pages.push(path.join(REPORTS, e.name, 'index.html'));
+  }
+  for (const page of pages) {
+    let html;
+    try { html = fs.readFileSync(page, 'utf8'); } catch { continue; }
+    if (!/from ['"]\/lib\//.test(html)) continue;                 // doesn't import shared modules
+    if (!BLOCK.test(html)) {
+      warn(`${path.relative(ROOT, page)}: imports /lib modules but has no <!-- webdata:modules --> block; it can run stale code on Safari (copy the block from templates/report/index.html)`);
+      continue;
+    }
+    if (writeIfChanged(page, html.replace(BLOCK, block))) log(`${path.relative(ROOT, page)}: module versions updated`);
+  }
+}
+
+// ---------------------------------------------------------------- main
+
+async function syncOnce() {
+  warnings = [];
+  for (const d of [STATE_DIR, DATA, REPORTS]) fs.mkdirSync(d, { recursive: true });
+  const state = { bots: {}, catalog: {}, ...readJSON(STATE_FILE, {}) };
+  const bots = listBots();
+  for (const bot of bots) await snapshotBot(bot, state);
+  const catalog = await buildCatalog(bots, state);
+  stampPages();
+  const reports = buildReports(catalog);
+  writeIfChanged(STATE_FILE, json(state));
+  return { databases: catalog.length, reports: reports.length };
+}
+
+/** Cheap change detector: stats of every input, no file contents. */
+function fingerprint() {
+  const parts = [statSig(path.join(OMB, 'bots.json')), statSig(path.join(ROOT, 'sync.json'))];
+  for (const b of listBots()) parts.push(statSig(b.db), statSig(b.db + '.wal'));
+  const walk = (dir, depth) => {
+    let entries = [];
+    try { entries = fs.readdirSync(dir, { withFileTypes: true }); } catch { return; }
+    for (const e of entries) {
+      if (e.name.startsWith('.') || GENERATED.has(e.name) || e.name === 'index.json' || e.name === 'catalog.json') continue;
+      const p = path.join(dir, e.name);
+      parts.push(p, statSig(p));
+      if (e.isDirectory() && depth < 4) walk(p, depth + 1);
+    }
+  };
+  walk(DATA, 0);
+  walk(REPORTS, 0);
+  for (const m of MODULES) parts.push(statSig(path.join(WEB, 'lib', m)));
+  parts.push(statSig(path.join(WEB, 'report.json')), statSig(path.join(WEB, 'icon.svg')));
+  return hash(parts.join('\n'));
+}
+
+async function main() {
+  const watch = process.argv.includes('--watch');
+  if (!watch) {
+    if (!acquireLock(60_000)) { console.error('another sync is running; gave up after 60s'); process.exit(1); }
+    try {
+      const r = await syncOnce();
+      console.log(`ok: ${r.databases} database(s), ${r.reports} report(s), ${warnings.length} warning(s)`);
+    } finally { releaseLock(); }
+    process.exit(warnings.length ? 2 : 0);
+  }
+
+  log(`watching (every ${config.poll_seconds}s): ${OMB}/bots, ${DATA}, ${REPORTS}`);
+  let last = null;
+  for (;;) {
+    try {
+      const fp = fingerprint();
+      if (fp !== last && acquireLock(0)) {
+        try { await syncOnce(); last = fp; } finally { releaseLock(); }
+      }
+    } catch (e) {
+      log('sync error:', e.stack || e.message);
+    }
+    await new Promise((r) => setTimeout(r, config.poll_seconds * 1000));
+  }
+}
+
+main();

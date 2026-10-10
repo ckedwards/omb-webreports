@@ -1,0 +1,49 @@
+#!/usr/bin/env node
+// webdata-errors: JavaScript errors reported by browsers viewing the site
+// (lib/report-errors.js → GET /_client-error → Apache access log).
+//
+//   webdata-errors            last 30 errors
+//   webdata-errors <n>        last n errors
+//   webdata-errors --since 1h only errors from the last hour (30m, 2h, 1d)
+
+import fs from 'node:fs';
+
+import { ACCESS_LOG as LOG } from './_config.mjs';
+const args = process.argv.slice(2);
+const sinceArg = args.includes('--since') ? args[args.indexOf('--since') + 1] : null;
+const count = Number(args.find((a) => /^\d+$/.test(a)) || 30);
+const since = sinceArg ? Date.now() - Number(sinceArg.slice(0, -1)) * { m: 60e3, h: 3600e3, d: 86400e3 }[sinceArg.slice(-1)] : 0;
+
+let text;
+try { text = fs.readFileSync(LOG, 'utf8'); } catch (e) {
+  console.error(`cannot read ${LOG}: ${e.message} (needs the adm group)`);
+  process.exit(1);
+}
+
+const device = (ua) => {
+  const ios = ua.match(/(iPhone|iPad)[^)]*OS (\d+)_(\d+)/);
+  if (ios) return `${ios[1]} iOS ${ios[2]}.${ios[3]}`;
+  if (/Android/.test(ua)) return 'Android';
+  const chrome = ua.match(/Chrome\/(\d+)/);
+  if (/HeadlessChrome/.test(ua)) return `HeadlessChrome ${chrome?.[1] ?? ''}`;
+  if (chrome) return `Chrome ${chrome[1]}`;
+  if (/Safari/.test(ua)) return 'Safari';
+  return ua.slice(0, 30);
+};
+
+const out = [];
+for (const line of text.split('\n')) {
+  const m = line.match(/^(\S+) \S+ \S+ \[([^\]]+)\] "GET \/_client-error\?(\S+) [^"]*" \d+ \S+ "[^"]*" "([^"]*)"/);
+  if (!m) continue;
+  const q = new URLSearchParams(m[3]);
+  const t = Number(q.get('t')) || 0;
+  if (t < since) continue;
+  out.push({ when: new Date(t).toISOString().replace('T', ' ').slice(0, 19), ip: m[1], dev: device(m[4]),
+    kind: q.get('k'), page: q.get('p'), msg: q.get('m'), src: q.get('s'), at: q.get('l') });
+}
+if (!out.length) { console.log('no client errors reported'); process.exit(0); }
+for (const e of out.slice(-count)) {
+  console.log(`${e.when}Z  ${e.dev}  ${e.page}  [${e.kind}]`);
+  console.log(`    ${e.msg.replace(/\n/g, '\n    ')}`);
+  if (e.src) console.log(`    at ${e.src}${e.at && e.at !== '0:0' ? `:${e.at}` : ''}`);
+}

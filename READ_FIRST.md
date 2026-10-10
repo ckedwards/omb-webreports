@@ -18,6 +18,7 @@ ROOT/
 ├── bin/                 tools, linked into /usr/local/bin
 │   ├── webdata-info     ROOT, SITE, versions, service status: start here
 │   ├── webdata-sync     snapshots, catalog, report index (runs as a service)
+│   ├── webdata-bake     bakes each report's first render (run by webdata-sync)
 │   ├── webdata-new-report  scaffold a report from templates/report
 │   ├── webdata-ls       list reports / databases / one report's details
 │   ├── webdata-sql      run SQL on the published databases (same names as reports)
@@ -62,7 +63,9 @@ ROOT/
    One hop: bot → snapshot → browser.
 5. Freshness is **ETag-based**: data files keep plain URLs. Apache sends
    `Cache-Control: no-cache` for everything, so browsers always revalidate
-   (cheap `304`). `kit.js` polls `HEAD` on each attached database every 15s
+   (cheap `304`). The one exception is shared code: the sync stamps
+   `?v=<content hash>` on `/lib/...` URLs in pages, and those are cached for a
+   year without revalidating (a new version is a new URL). `kit.js` polls `HEAD` on each attached database every 15s
    while the page is visible (and on return to the page); a new ETag →
    re-attach → `render()` runs again. A changed report `index.html` reloads the page.
 
@@ -101,6 +104,7 @@ A report directory:
 | `icon.svg` | you (optional) | 512×512 square, full-bleed background, no transparency, no rounded corners (iOS rounds them). Generated from the title's initials if missing. |
 | `icon-180.png`, `icon-512.png` | sync | rendered from `icon.svg` |
 | `manifest.webmanifest` | sync | from `report.json`; makes it an installable standalone app scoped to its dir |
+| `initial.json` | sync (webdata-bake) | the first render's query results, so a first visit doesn't wait for DuckDB-WASM (see "Baked first render") |
 
 `report.json`:
 
@@ -153,6 +157,9 @@ Exploring data: `webdata-ls` (what exists), `webdata-ls data`
   Safari can run a cached ES module without revalidating it; a page without the
   block can break on iPhones after a kit change (`webdata-sync` warns about it).
   Keep importing `'/lib/kit.js'` as usual; the map does the rest.
+- Write shared files as plain URLs (`href="/lib/kit.css"`,
+  `src="/lib/vendor/d3.min.js"`). The sync adds `?v=<hash>` to every `src`/`href`
+  pointing into `/lib/` and keeps it current; don't add or edit those yourself.
 - **Keep `<script src="/lib/report-errors.js">`** first in `<head>`: it reports
   JavaScript errors from real devices to the server log. Read them with
   `webdata-errors` (e.g. when someone says a page is broken on their phone).
@@ -181,14 +188,31 @@ someSelect.onchange = () => app.redraw();   // re-render after a control changes
   page + SQL + the current ETag of every database. A revisit with unchanged
   data renders from the cache (~0.1s) and never starts DuckDB-WASM (~1–1.5s even
   when its files are cached). New data means a new ETag, which means a cache miss
-  and a real query, so the cache can't serve stale data. The engine starts on the
-  first tap/keypress so a control that needs a fresh query is quick. Consequences:
+  and a real query, so the cache can't serve stale data. After the first render
+  the engine starts in the background when the page is idle (or on the first
+  tap, if sooner), so a control that needs a fresh query is quick (~70 ms once
+  it's ready). `report({ ..., warm: false })` skips the background start, for
+  a page with no controls that run new queries. Consequences:
   - SQL whose result isn't determined by the databases alone (`now()`,
     `random()`, `read_parquet` of another URL) must use `db.query(sql, { cache: false })`.
   - Rows are fresh copies on every call (safe to sort/mutate). Keep queries
     deterministic (`ORDER BY` when order matters) so a cached result equals a live one.
   - Load timing is marked: `performance.getEntriesByType('mark')`
-    (`kit:engine-*`, `kit:attached:*`, `kit:rendered:*`).
+    (`kit:engine-*`, `kit:attached:*`, `kit:baked-*`, `kit:rendered:*`).
+- **Baked first render.** Nothing to do in report code. After a report's data
+  or page changes, `webdata-sync` runs `webdata-bake`: it opens the report in
+  headless Chrome with `?kit-bake`, records the rows of every cached query the
+  first render runs, and writes them to the report's `initial.json`; the sync
+  links that file from the modules block. A first visit (or the first visit
+  after new data) then renders in ~0.1–0.3s from those rows, keyed by SQL and
+  database ETags exactly like the result cache. Only if the data changed in
+  the seconds before the next bake does kit draw the baked rows first, show
+  "Updating…", and redraw with live data. What this means for you:
+  - The first render must not depend on the viewer: its default state (no
+    `localStorage` choice, any width) is what gets baked. A query that differs
+    still works, it just waits for the engine.
+  - A failed first render means no bake: `webdata-check` runs the bake and
+    prints its result, and failures appear in `journalctl -u webdata-sync`.
 - Qualify tables as `<database>.main.<table>`.
 - `chart(el, plotOptions)`: Observable Plot with house style and the
   categorical palette as the default color range; width = element width.
@@ -226,14 +250,16 @@ at the result in light **and** dark (`webdata-check` saves both).
 Logs: `journalctl -u webdata-sync -f`. Optional `ROOT/sync.json`:
 
 ```json
-{ "exclude_bots": ["Otto"], "poll_seconds": 3 }
+{ "exclude_bots": ["Otto"], "poll_seconds": 3, "bake": true, "bake_max_kb": 1024 }
 ```
 
 `exclude_bots` takes names or ids; nothing from those bots is published
-(delete an already-published `webroot/data/<name>.duckdb` by hand).
+(delete an already-published `webroot/data/<name>.duckdb` by hand). `bake`
+turns baked first renders on or off; `bake_max_kb` skips reports whose first
+render returns more than that.
 Everything in `webroot/` is readable by every device on the tailnet.
 
-Generated files (`data/*`, `reports/index.json`, report manifests and PNG icons)
+Generated files (`data/*`, `reports/index.json`, report manifests, PNG icons and `initial.json`)
 are rewritten only when their content changes. Don't edit them by hand.
 
 ## Gotchas
@@ -244,9 +270,10 @@ are rewritten only when their content changes. Don't edit them by hand.
   report instead. Range requests are served uncompressed on purpose.
 - Compressed responses keep the file's plain ETag (`BrotliAlterETag NoChange`), so
   `304`s work.
-- First load of any report fetches the DuckDB-WASM engine (~7 MB compressed, from
-  jsDelivr; cached afterwards) and compiles it (~1s). Revisits with unchanged data
-  skip the engine entirely (result cache). Keep the template's `<head>`:
+- The DuckDB-WASM engine is ~7 MB compressed (from jsDelivr; cached afterwards)
+  and compiles in ~1s. The first render normally skips it (baked first render,
+  result cache); it then starts in the background (see "Result cache"), or
+  right away when a query has no cached or baked result. Keep the template's `<head>`:
   `preconnect` to jsDelivr, `modulepreload` of kit, `defer` on d3/Plot.
 - `GET …/<name>.duckdb.wal 404` in the access log is normal: DuckDB checks for a WAL.
 - No offline mode: kit doesn't use service workers, so home-screen apps need the

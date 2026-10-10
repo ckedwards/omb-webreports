@@ -6,6 +6,8 @@
 // its own error handling. Errors go out as GET /_client-error?...; the server
 // answers 404 and the access log keeps the query string. At most 5 per page.
 (function () {
+  // webdata-bake's headless renders report their own failures to webdata-sync.
+  if (/[?&]kit-bake\b/.test(location.search)) { window.__reportError = function () {}; return; }
   var sent = 0;
   function send(kind, message, source, line, col) {
     if (sent >= 5) return;

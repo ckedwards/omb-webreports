@@ -1,0 +1,194 @@
+#!/usr/bin/env node
+// webdata-bake: pre-compute each report's first render, so a first visit (or
+// the first visit after new data) shows the report without waiting ~1-2 s for
+// DuckDB-WASM to start.
+//
+// Opens the report in headless Chrome with ?kit-bake. kit runs the first
+// render with the real engine, records every query's rows, and this writes
+// them to webroot/reports/<slug>/initial.json. webdata-sync then links the
+// file from the page (a preload in the webdata:modules block), and kit uses
+// the rows only for the database versions they came from. Report code needs
+// nothing for this; filters and later queries still run in the browser.
+//
+// Usage: webdata-bake             bake reports whose page or data changed
+//                                 (webdata-sync runs this on its own)
+//        webdata-bake <slug>...   bake these reports now
+//        webdata-bake --all       bake every report now
+//
+// sync.json: "bake": false turns it off; "bake_max_kb" (default 1024) skips
+// reports whose first render returns more than that.
+
+import { execFile } from 'node:child_process';
+import fs from 'node:fs';
+import path from 'node:path';
+
+import { ROOT, LOCAL_URL } from './_config.mjs';
+import { BAKE_FILE, BAKE_STATE, bakeConfig, bakeTargets, dueTargets, readBakeState } from './_bake.mjs';
+
+const args = process.argv.slice(2);
+if (args.some((a) => a === '-h' || a === '--help')) {
+  const src = fs.readFileSync(new URL(import.meta.url), 'utf8').split('\n').slice(1, 20);
+  console.log(src.map((l) => l.replace(/^\/\/ ?/, '')).join('\n'));
+  process.exit(0);
+}
+const all = args.includes('--all');
+const slugs = args.filter((a) => !a.startsWith('--'));
+const manual = all || slugs.length > 0;
+
+const STATE_DIR = path.join(ROOT, '.state');
+const LOCK = path.join(STATE_DIR, 'bake.lock');
+const PROFILE = path.join(STATE_DIR, 'bake-chrome');   // keeps DuckDB-WASM in Chrome's HTTP cache
+const TIMEOUT_MS = 90_000;                             // per report
+
+const log = (...a) => console.log(...a);
+const config = bakeConfig();
+if (!config.enabled && !manual) process.exit(0);
+
+// ---------------------------------------------------------------- what to bake
+
+const state = readBakeState();
+const targets = all ? bakeTargets()
+  : slugs.length ? bakeTargets().filter((t) => slugs.includes(t.slug))
+  : dueTargets(state);
+for (const s of slugs) {
+  if (!targets.some((t) => t.slug === s)) {
+    console.error(`${s}: not bakeable (no such report, no "databases" in report.json, or no webdata:modules block)`);
+    process.exitCode = 1;
+  }
+}
+if (!targets.length) process.exit(process.exitCode ?? 0);
+
+// One bake at a time (the service and a person can both start one).
+fs.mkdirSync(STATE_DIR, { recursive: true });
+function lock(waitMs) {
+  const deadline = Date.now() + waitMs;
+  for (;;) {
+    try { fs.writeFileSync(LOCK, String(process.pid), { flag: 'wx' }); return true; } catch {}
+    const pid = Number(fs.readFileSync(LOCK, 'utf8') || 0);
+    let alive = false;
+    try { if (pid) { process.kill(pid, 0); alive = true; } } catch {}
+    if (!alive) { fs.rmSync(LOCK, { force: true }); continue; }
+    if (Date.now() > deadline) return false;
+    Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 250);
+  }
+}
+if (!lock(manual ? 120_000 : 0)) {
+  if (manual) { console.error('another bake is running; gave up after 2 min'); process.exit(1); }
+  process.exit(0);
+}
+
+// ---------------------------------------------------------------- browser
+
+const newest = (dir, rest) => {
+  try {
+    return fs.readdirSync(dir).sort((a, b) => a.localeCompare(b, undefined, { numeric: true }))
+      .map((d) => path.join(dir, d, rest)).filter((p) => fs.existsSync(p)).pop();
+  } catch { return undefined; }
+};
+const HOME = process.env.HOME;
+const AB = newest(path.join(HOME, '.openmausbot', 'tools', 'agent-browser'), 'agent-browser');
+const CHROME = newest(path.join(HOME, '.agent-browser', 'browsers'), 'chrome');
+
+// Short path: agent-browser's Unix sockets live here and are length-limited.
+const home = fs.mkdtempSync('/tmp/wbk.');
+const env = {
+  ...process.env, HOME: home, XDG_RUNTIME_DIR: home, XDG_CONFIG_HOME: path.join(home, '.config'),
+  XDG_CACHE_HOME: path.join(home, '.cache'), AGENT_BROWSER_SOCKET_DIR: home,
+  AGENT_BROWSER_EXECUTABLE_PATH: CHROME, AGENT_BROWSER_PROFILE: PROFILE,
+};
+
+function ab(timeout, ...cmd) {
+  return new Promise((resolve, reject) => {
+    execFile(AB, ['--json', '--session', 'bake', ...cmd], { env, timeout, maxBuffer: 256 * 1024 * 1024 }, (err, stdout) => {
+      let out;
+      try { out = JSON.parse(stdout); } catch {
+        return reject(new Error(err?.killed ? 'timed out' : `agent-browser: ${(err?.message || stdout || 'no output').split('\n')[0]}`));
+      }
+      if (!out.success) return reject(new Error(out.error || 'agent-browser failed'));
+      resolve(out.data);
+    });
+  });
+}
+
+/** Write only if content differs; atomic via a dotfile (never served, inherits the dir's ACL). */
+function writeIfChanged(file, content) {
+  try { if (fs.readFileSync(file, 'utf8') === content) return false; } catch {}
+  const tmp = path.join(path.dirname(file), `.tmp-${path.basename(file)}-${process.pid}`);
+  fs.writeFileSync(tmp, content);
+  fs.renameSync(tmp, file);
+  return true;
+}
+
+async function bake(t) {
+  const started = Date.now();
+  const deadline = started + TIMEOUT_MS;
+  const left = () => Math.max(1000, deadline - Date.now());
+  await ab(left(), 'open', `${LOCAL_URL}/reports/${t.slug}/?kit-bake`);
+  try {
+    await ab(left(), 'wait', 'html[data-kit-bake]', '--timeout', String(left() - 2000));
+  } catch {
+    throw new Error(`the first render didn't finish within ${TIMEOUT_MS / 1000}s`);
+  }
+  const { result: status } = await ab(left(), 'eval', 'document.documentElement.dataset.kitBake');
+  if (status !== 'ready') {
+    const { result: msg } = await ab(left(), 'eval', 'document.querySelector(".kit-error")?.textContent || "render failed"');
+    throw new Error(String(msg).replace(/^Something went wrong\.\s*/, '').replace(/\s+/g, ' ').slice(0, 300));
+  }
+  const { result: text } = await ab(left(), 'eval', 'window.__kitBake()');
+  const data = JSON.parse(text);
+  if (data.format !== 1 || !Array.isArray(data.results)) throw new Error('unexpected bake output');
+  return { text, queries: data.results.length, ms: Date.now() - started };
+}
+
+// ---------------------------------------------------------------- main
+
+let failures = 0;
+try {
+  if (!AB || !CHROME) throw new Error('agent-browser or Chrome not found (expected under ~/.openmausbot/tools and ~/.agent-browser/browsers)');
+  await ab(30_000, 'set', 'device', 'iPhone 16 Pro');
+  for (const t of targets) {
+    const file = path.join(t.dir, BAKE_FILE);
+    try {
+      const r = await bake(t);
+      const bytes = Buffer.byteLength(r.text);
+      if (!r.queries) {
+        fs.rmSync(file, { force: true });
+        state[t.slug] = { key: t.key, at: Date.now(), skipped: 'no cacheable queries' };
+        log(`${t.slug}: nothing to bake (the first render ran no cacheable queries)`);
+      } else if (bytes > config.maxBytes) {
+        fs.rmSync(file, { force: true });
+        state[t.slug] = { key: t.key, at: Date.now(), skipped: `too large (${Math.round(bytes / 1024)} KB)` };
+        log(`${t.slug}: not baked: first render returns ${Math.round(bytes / 1024)} KB (limit ${config.maxBytes / 1024} KB, "bake_max_kb" in sync.json)`);
+      } else {
+        const changed = writeIfChanged(file, r.text + '\n');
+        state[t.slug] = { key: t.key, at: Date.now(), queries: r.queries, bytes };
+        log(`${t.slug}: ${r.queries} quer${r.queries === 1 ? 'y' : 'ies'}, ${(bytes / 1024).toFixed(1)} KB${changed ? '' : ' (unchanged)'} in ${(r.ms / 1000).toFixed(1)} s`);
+      }
+    } catch (e) {
+      failures++;
+      // A bake that can't be refreshed must not linger: kit would show its
+      // outdated rows first on every visit until a new one exists.
+      fs.rmSync(file, { force: true });
+      state[t.slug] = { key: t.key, failed_at: Date.now(), error: e.message };
+      log(`${t.slug}: bake failed: ${e.message}`);
+    }
+  }
+} catch (e) {
+  failures = targets.length;
+  for (const t of targets) {
+    fs.rmSync(path.join(t.dir, BAKE_FILE), { force: true });
+    state[t.slug] = { key: t.key, failed_at: Date.now(), error: e.message };
+  }
+  log(`bake failed: ${e.message}`);
+} finally {
+  for (const slug of Object.keys(state)) {
+    if (!fs.existsSync(path.join(ROOT, 'webroot', 'reports', slug))) delete state[slug];
+  }
+  fs.writeFileSync(BAKE_STATE, JSON.stringify(state, null, 2) + '\n');
+  await new Promise((r) => execFile(AB || 'true', ['--session', 'bake', 'close'], { env, timeout: 10_000 }, () => r()));
+  for (const pattern of [home, PROFILE]) await new Promise((r) => execFile('pkill', ['-KILL', '-f', pattern], () => r()));
+  fs.rmSync(home, { recursive: true, force: true });
+  fs.rmSync(LOCK, { force: true });
+}
+if (manual) log('The page links it on the next sync pass (automatic while webdata-sync runs; or webdata-sync --once).');
+process.exit(failures ? 1 : 0);

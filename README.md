@@ -25,7 +25,10 @@ changes. Save any report to your iPhone home screen and it behaves like an app.
 - **Live data, no deploys.** When a bot's data changes, its database is
   re-published within seconds and every open report re-renders within ~20 s.
   Freshness is ETag-based: browsers revalidate (`304`), nothing is re-downloaded
-  until it changes, and revisits render from a local result cache in ~0.1 s.
+  until it changes; shared code is cached under content-hashed URLs, so moving
+  between reports fetches none of it. Each report's first render is pre-computed on the server
+  after every change, so pages show their data in ~0.1–0.3 s without waiting
+  for the in-browser database engine; filters then run live.
 - **Scheduled data refreshes without AI.** After a bot collects data once, it can
   turn the collection into a plain script on a cron schedule (APIs, CSV/JSON,
   HTML, or JavaScript-rendered pages via headless Chrome). Runs are validated
@@ -45,11 +48,12 @@ changes. Save any report to your iPhone home screen and it behaves like an app.
                                    │  browser-compatible format, ~240 KB → ~8 KB on the wire
                                    ▼
  scheduled job ─────────▶ webroot/data/<bot>.duckdb + catalog.json
- (webdata-jobs service:            │
-  script → validate → apply)       │  Apache, tailnet only, ETag + Cache-Control: no-cache
+ (webdata-jobs service:            │  + reports/<slug>/initial.json: each report's first
+  script → validate → apply)       │    render, baked in headless Chrome after every change
+                                   │  Apache, tailnet only, ETag + Cache-Control: no-cache
                                    ▼
-          phone / browser ── report = HTML + /lib/kit.js ── DuckDB-WASM runs the SQL
-                             polls ETags, re-renders on change, caches results per version
+          phone / browser ── report = HTML + /lib/kit.js ── first render from the bake,
+                             then DuckDB-WASM runs the SQL; polls ETags, re-renders on change
 ```
 
 More in [docs/architecture.md](docs/architecture.md).
@@ -104,6 +108,7 @@ From a shell:
 | `webdata-new-report <slug> "<Title>" <db>` | scaffold a report |
 | `webdata-check <slug>` | render a report at iPhone size, light + dark: errors, overflow, screenshots |
 | `webdata-errors` | JavaScript errors reported by real browsers/phones |
+| `webdata-bake <slug>` | re-bake a report's first render now (automatic after changes) |
 | `webdata-job list\|run\|logs\|enable\|disable` | scheduled data jobs |
 | `webdata-browse <url> --eval '<js>'` | headless Chrome for job scripts |
 

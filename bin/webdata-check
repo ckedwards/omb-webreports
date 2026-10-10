@@ -29,6 +29,11 @@ trap 'ab close >/dev/null 2>&1' EXIT
 problems=0
 echo "== sync"
 "$ROOT/bin/webdata-sync" --once | sed 's/^/  /' || problems=1
+if [[ $slug != _* ]] && node -e 'process.exit((JSON.parse(require("fs").readFileSync(process.argv[1], "utf8")).databases || []).length ? 0 : 1)' "$ROOT/webroot/reports/$slug/report.json" 2>/dev/null; then
+  echo "== bake (first render, for fast first visits)"
+  "$ROOT/bin/webdata-bake" "$slug" 2>&1 | grep -v '^The page links it' | sed 's/^/  /' || problems=1
+  "$ROOT/bin/webdata-sync" --once >/dev/null 2>&1   # links the bake from the page
+fi
 
 url="$SITE/reports/$slug/"
 ab set device "iPhone 16 Pro" >/dev/null 2>&1
@@ -45,7 +50,10 @@ for mode in light dark; do
   done
   ab eval '(() => {
     const m = performance.getEntriesByName("kit:rendered:initial")[0];
-    const engine = performance.getEntriesByName("kit:engine-start").length ? "engine started" : "from result cache";
+    // The engine also starts in the background after the render; only count it if it came first.
+    const at = (n) => performance.getEntriesByName(n)[0]?.startTime ?? Infinity;
+    const engine = performance.getEntriesByName("kit:baked-used").length ? "from baked first render"
+      : at("kit:engine-start") < at("kit:rendered:initial") ? "engine started" : "from result cache";
     const err = document.querySelector(".kit-error")?.textContent;
     const over = document.documentElement.scrollWidth - document.documentElement.clientWidth;
     return [

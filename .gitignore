@@ -10,6 +10,7 @@
 /webroot/icon-*.png
 /webroot/reports/*/manifest.webmanifest
 /webroot/reports/*/icon-*.png
+/webroot/reports/*/initial.json
 
 # Your content: reports and data jobs belong to your bots, not to the
 # platform. Only the design gallery ships; examples/ holds a reference report.

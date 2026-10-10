@@ -31,6 +31,8 @@ function tailscaleIp() {
 const port = pick('LISTEN_PORT', '8080');
 export const LISTEN_IP = pick('LISTEN_IP', '') || tailscaleIp() || '127.0.0.1';
 export const SITE_URL = pick('SITE_URL', `http://${LISTEN_IP}:${port}`).replace(/\/$/, '');
+/** Apache directly (no HTTPS proxy): for tools on this machine. */
+export const LOCAL_URL = `http://${LISTEN_IP.includes(':') ? `[${LISTEN_IP}]` : LISTEN_IP}:${port}`;
 export const OMB_DATA_DIR = pick('OMB_DATA_DIR', path.join(os.homedir(), '.openmausbot'));
 export const NODE_MODULES_DIR = pick('NODE_MODULES_DIR', '/usr/lib/node_modules');
 export const ACCESS_LOG = '/var/log/apache2/webdata-access.log';

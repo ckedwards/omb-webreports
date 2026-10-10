@@ -53,8 +53,8 @@ reported to the server log.
 
 Metadata (title, description, tags, theme color) is in `report.json`; the
 home-screen label is `short_name`. Icon: edit `icon.svg` (512×512, full-bleed,
-no transparency). Generated files (`manifest.webmanifest`, `icon-*.png`)
-update themselves; never edit them.
+no transparency). Generated files (`manifest.webmanifest`, `icon-*.png`,
+`initial.json`) update themselves; never edit them.
 
 ## 3. Verify
 

@@ -70,8 +70,9 @@ Edit `webroot/reports/<slug>/index.html`:
   tags, kit.css, the `<!-- webdata:modules -->` block, preconnect, `defer`
   scripts) and the `.app-header` with the back link and `<div data-kit-status>`.
   Change only `<title>` and `apple-mobile-web-app-title`. Never edit the
-  `webdata:modules` block; the sync maintains it (it keeps iPhones from running
-  a stale cached kit.js).
+  `webdata:modules` block or the `?v=…` on `/lib/` URLs; the sync maintains
+  them (they keep iPhones from running a stale cached kit, and let browsers
+  cache shared code).
 - Put all content inside `<main>`; use the kit components exactly as
   DESIGN.md §5 shows (`stats()`, `segmented()`, `table()`, `legend()`,
   `empty()`, `.card` with `header h2` + `p`).
@@ -98,7 +99,7 @@ square in the theme color, one bold glyph, no transparency, no rounded corners.
 PNG icons and the manifest are generated for you.
 
 Don't touch `webroot/lib/`, `webroot/data/`, other reports, generated files
-(`manifest.webmanifest`, `icon-*.png`, `index.json`) or `ROOT/admin/`.
+(`manifest.webmanifest`, `icon-*.png`, `initial.json`, `index.json`) or `ROOT/admin/`.
 
 ## 6. Verify, then look
 

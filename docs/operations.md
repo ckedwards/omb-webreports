@@ -12,6 +12,7 @@ webdata-check <slug>               # render on a headless iPhone, light + dark; 
 webdata-errors --since 1h          # JavaScript errors reported by real browsers and phones
 webdata-new-report <slug> "<Title>" <bot> "<description>"
 webdata-sync --once                # one sync pass now; prints warnings (bad report.json, …)
+webdata-bake <slug>                # re-bake a report's first render now (the service does this itself)
 webdata-job list                   # scheduled jobs: last result, next run (see data-jobs.md)
 ```
 
@@ -19,7 +20,7 @@ webdata-job list                   # scheduled jobs: last result, next run (see 
 
 | Service | Logs |
 |---|---|
-| `webdata-sync` | `journalctl -u webdata-sync -f` |
+| `webdata-sync` | `journalctl -u webdata-sync -f` (bakes log as `bake: …`) |
 | `webdata-jobs` | `journalctl -u webdata-jobs -f`; per run: `webdata-job logs <name>` |
 | `apache2` | `/var/log/apache2/webdata-access.log`, `webdata-error.log` |
 | `openmausbot` | `journalctl -u openmausbot -f` |
@@ -35,8 +36,11 @@ log keeps them for `webdata-errors`.
   After changing the listen address, port or networks, re-run
   `sudo bash admin/install.sh`. `SITE_URL` and paths are read by the tools on each run.
 - `sync.json` (optional, git-ignored):
-  `{ "exclude_bots": ["SomeBot"], "poll_seconds": 3 }`. Excluded bots are never
-  published; delete an already-published `webroot/data/<bot>.duckdb` by hand.
+  `{ "exclude_bots": ["SomeBot"], "poll_seconds": 3, "bake": true, "bake_max_kb": 1024 }`.
+  Excluded bots are never published; delete an already-published
+  `webroot/data/<bot>.duckdb` by hand. `"bake": false` turns off baked first
+  renders (reports then start DuckDB-WASM on every first visit);
+  `bake_max_kb` skips reports whose first render returns more than that.
 
 ## Troubleshooting
 
@@ -44,12 +48,23 @@ log keeps them for `webdata-errors`.
 `webdata-errors --since 1h`. `Importing binding name '…' is not found` means the
 phone ran a stale `kit.js`: check the page still has its
 `<!-- webdata:modules -->` block (`webdata-sync --once` warns about pages that
-don't), and that `webdata-sync` is running.
+don't), and that `webdata-sync` is running. Shared files are cached by their
+`?v=` URL for a year, so a page whose `/lib/` URLs lost their `?v=` (or a
+hand-written stale one) is the other thing to check: `webdata-sync --once`
+re-stamps them.
 
 **A report shows old data.** `webdata-ls` shows when each database was last
 published. If the bot's data changed but the snapshot didn't:
 `systemctl status webdata-sync` and its journal. Open pages pick up new data
 within ~20 s; a page in the background checks when it's shown again.
+
+**A report is slow on first visit** (the status shows "Loading…" for a second
+or more). Its first render isn't baked. `journalctl -u webdata-sync | grep bake:`
+says why: the render failed (fix the report; it retries after 10 minutes or
+on the next change), it was too large (`bake_max_kb`), or it ran no cacheable
+queries. `webdata-check <slug>` bakes and reports `rendered: … (from baked
+first render)` when it works. A first render that depends on the viewer (a
+remembered tab, the screen width) can't use the bake for those viewers.
 
 **"Something went wrong" banner.** The message is the SQL or JavaScript error;
 `webdata-check <slug>` shows the same plus page and console errors. Common

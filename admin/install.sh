@@ -42,7 +42,7 @@ SITE_URL=${SITE_URL:-http://$LISTEN_IP:$LISTEN_PORT}
 OMB_DATA_DIR=${OMB_DATA_DIR:-$HOME_DIR/.openmausbot}
 NODE_MODULES_DIR=${NODE_MODULES_DIR:-/usr/lib/node_modules}
 NODE=$(command -v node || true)
-TOOLS=(webdata-info webdata-ls webdata-sql webdata-check webdata-new-report webdata-job webdata-browse webdata-errors webdata-sync)
+TOOLS=(webdata-info webdata-ls webdata-sql webdata-check webdata-new-report webdata-job webdata-browse webdata-errors webdata-sync webdata-bake)
 
 # --- preflight ----------------------------------------------------------------
 [[ -n $NODE ]] || die "node not found (Node.js 20+ is required; see docs/setup.md)"
@@ -98,9 +98,15 @@ put /etc/apache2/sites-available/webdata.conf <<EOF
         Require all granted
 
         # Browsers may keep a copy but must revalidate (ETag -> 304) every
-        # time, so a changed file is picked up. (Shared ES modules are also
-        # content-versioned by webdata-sync: Safari skips revalidating modules.)
+        # time, so a changed file is picked up.
         Header set Cache-Control "no-cache"
+        # Except shared files under /lib requested as ?v=<content hash>:
+        # webdata-sync stamps those URLs into pages, and a new version is a new
+        # URL, so they are cached for a year without revalidating. Moving
+        # between reports then fetches no shared code at all.
+        <If "%{REQUEST_URI} =~ m#^/lib/# && %{QUERY_STRING} =~ /^v=[0-9a-f]{12}\$/">
+            Header set Cache-Control "public, max-age=31536000, immutable"
+        </If>
     </Directory>
 
     # Read-only, and only from the allowed networks.

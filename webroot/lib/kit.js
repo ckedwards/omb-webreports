@@ -16,7 +16,9 @@
 //
 // Load speed: query results are cached in IndexedDB per database ETag, so a
 // revisit with unchanged data renders without starting DuckDB-WASM (which
-// costs ~1s of compile even when cached). See "result cache" below.
+// costs ~1s of compile even when cached), and the server bakes each report's
+// first-render results so a first visit doesn't wait for it either. See
+// "result cache" and "baked first render" below.
 
 const DUCKDB_WASM = 'https://cdn.jsdelivr.net/npm/@duckdb/duckdb-wasm@1.32.0/+esm';
 const POLL_MS = 15000;
@@ -184,6 +186,78 @@ function pruneCache() {
   });
 }
 
+// ---------------------------------------------------------------- baked first render
+//
+// webdata-bake (run by webdata-sync when a report's data or page changes)
+// opens each report headless with ?kit-bake, records every cached query the
+// first render ran, and writes the rows to the report's initial.json. The
+// page links that file (a preload in the webdata:modules block), so a first
+// visit, or the first visit after new data, renders without DuckDB-WASM.
+// Entries are used only for the database versions they were made from, like
+// the result cache. One exception: if the data moved on since the bake (the
+// seconds before the next bake), the first render uses them anyway, says
+// "Updating…", and redraws as soon as the engine has the new data.
+
+const BAKE = new URLSearchParams(location.search).has('kit-bake');
+const recorded = new Map();   // bake mode: sql -> rows of the first render
+let recording = false;
+let baked = null;             // Promise<{ versions, results: Map<sql, rows> } | null>
+let staleOk = false;          // first render only: may use outdated baked rows
+let servedStale = false;
+
+// JSON can't hold Date, NaN or Infinity; tag them.
+function bakeReplacer(k, v) {
+  const o = this[k];
+  if (o instanceof Date) return { $date: o.getTime() };
+  if (typeof v === 'number' && !Number.isFinite(v)) return { $num: String(v) };
+  return v;
+}
+function bakeReviver(k, v) {
+  if (v && typeof v === 'object' && !Array.isArray(v)) {
+    const keys = Object.keys(v);
+    if (keys.length === 1 && keys[0] === '$date') return new Date(v.$date);
+    if (keys.length === 1 && keys[0] === '$num') return Number(v.$num);
+  }
+  return v;
+}
+
+/** Bake mode: the first render's results as initial.json content. */
+if (BAKE) {
+  window.__kitBake = () => JSON.stringify({
+    format: 1,
+    versions: versions(),
+    results: [...recorded].map(([sql, rows]) => ({ sql, rows })),
+  }, bakeReplacer);
+}
+
+function loadBaked() {
+  baked ??= (async () => {
+    const link = document.querySelector('link[data-kit-initial]');
+    if (BAKE || !link) return null;
+    try {
+      const r = await fetch(link.href);
+      if (!r.ok) return null;
+      const data = JSON.parse(await r.text(), bakeReviver);
+      if (data.format !== 1) return null;
+      mark('baked-loaded');
+      return { versions: data.versions, results: new Map(data.results.map((e) => [e.sql, e.rows])) };
+    } catch { return null; }
+  })();
+  return baked;
+}
+
+async function fromBaked(sql) {
+  const b = await loadBaked();
+  const rows = b?.results.get(sql);
+  if (!rows) return null;
+  if (b.versions !== versions()) {
+    if (!staleOk) return null;
+    servedStale = true;
+  }
+  mark('baked-used');
+  return structuredClone(rows);
+}
+
 /**
  * Run SQL; returns an array of plain objects (BIGINT, HUGEINT, DECIMAL ->
  * Number; DATE/TIMESTAMP -> Date). Results are cached per database version
@@ -191,9 +265,11 @@ function pruneCache() {
  */
 export async function query(sql, { cache = true } = {}) {
   const key = cache && known.size ? cacheKey(sql) : null;
-  if (key) {
+  if (key && !BAKE) {
     const hit = await idbRun('readonly', (store) => store.get(key));
     if (hit) return hit.rows;
+    const bakedRows = await fromBaked(sql);
+    if (bakedRows) return bakedRows;
   }
   const conn = await ensureAttached();
   const result = await conn.query(sql);
@@ -204,7 +280,8 @@ export async function query(sql, { cache = true } = {}) {
     for (const f of fields) obj[f.name] = plain(row[f.name], f.type);
     rows.push(obj);
   }
-  if (key) idbRun('readwrite', (store) => store.put({ rows, at: Date.now() }, key));
+  if (key && BAKE) { if (recording) recorded.set(sql, structuredClone(rows)); }
+  else if (key) idbRun('readwrite', (store) => store.put({ rows, at: Date.now() }, key));
   return rows;
 }
 
@@ -241,8 +318,10 @@ function showError(err) {
  * render(db, { reason }) must be idempotent: it is called again on data
  * change ('data'), color-scheme change ('theme') and width change ('resize').
  * Returns { redraw(reason) } for controls that change what is shown.
+ * warm: false skips starting DuckDB-WASM in the background after the first
+ * render (for a page with no controls that run new queries).
  */
-export function report({ databases = [], render, poll = POLL_MS }) {
+export function report({ databases = [], render, poll = POLL_MS, warm = true }) {
   const status = statusEl();
   const main = document.querySelector('main');
   let pageTag = null;
@@ -255,6 +334,7 @@ export function report({ databases = [], render, poll = POLL_MS }) {
     return times.length ? `Data updated ${fmt.ago(new Date(Math.max(...times)))}` : 'Live';
   };
 
+  /** Returns true if render() succeeded. */
   async function draw(reason) {
     if (busy) return busy.then(() => draw(reason));
     busy = (async () => {
@@ -264,14 +344,16 @@ export function report({ databases = [], render, poll = POLL_MS }) {
         mark(`rendered:${reason}`);
         showError(null);
         setStatus('ok', updatedText());
+        return true;
       } catch (err) {
         showError(err);
         setStatus('error', 'Error');
+        return false;
       } finally {
         main?.classList.remove('loading');
       }
     })();
-    try { await busy; } finally { busy = null; }
+    try { return await busy; } finally { busy = null; }
   }
 
   async function check() {
@@ -289,19 +371,36 @@ export function report({ databases = [], render, poll = POLL_MS }) {
 
   (async () => {
     setStatus('loading', 'Loading…');
+    loadBaked();
     try {
       [{ tag: pageTag }] = await Promise.all([head(location.pathname), connect(databases)]);
     } catch (err) {
       showError(err);
       setStatus('error', 'Error');
+      if (BAKE) document.documentElement.dataset.kitBake = 'error';
       return;
     }
-    await draw('initial');
+    staleOk = recording = true;
+    const ok = await draw('initial');
+    staleOk = recording = false;
+    if (BAKE) { document.documentElement.dataset.kitBake = ok ? 'ready' : 'error'; return; }
+    if (servedStale) {
+      // Drawn from a bake of older data: swap in the current data.
+      servedStale = false;
+      setStatus('loading', 'Updating…');
+      await draw('data');
+    }
     pruneCache();
-    // A cached render never started the engine; start it on the first touch
-    // so a control that needs a fresh query doesn't wait for the boot.
-    for (const type of ['pointerdown', 'keydown']) {
-      addEventListener(type, () => ensureAttached().catch(() => {}), { once: true, passive: true });
+    // A baked or cached render never started the engine. Start it once the
+    // page is idle, so the first control that needs a new query doesn't wait
+    // ~1-3 s for it; a touch before then starts it at once. Startup runs in
+    // DuckDB's worker, so it doesn't block scrolling. Skipped for warm: false
+    // and when the browser asks to save data.
+    const warmUp = () => ensureAttached().catch(() => {});
+    for (const type of ['pointerdown', 'keydown']) addEventListener(type, warmUp, { once: true, passive: true });
+    if (warm && known.size && !navigator.connection?.saveData) {
+      if (window.requestIdleCallback) requestIdleCallback(warmUp, { timeout: 2000 });
+      else setTimeout(warmUp, 500);
     }
     setInterval(check, poll);
     document.addEventListener('visibilitychange', () => { if (!document.hidden) check(); });

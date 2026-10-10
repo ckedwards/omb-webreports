@@ -2,24 +2,40 @@
 
 ## Components
 
+```mermaid
+flowchart TB
+    subgraph machine["The machine"]
+        omb["openmausbot.service<br/>bots"]
+        jobs["webdata-jobs.service<br/>script → validate → apply"]
+        botdb[("bots/#lt;id#gt;/data.duckdb")]
+        sync["webdata-sync.service<br/>polls every 3 s"]
+        webroot[("webroot/<br/>data/ · reports/ · lib/")]
+        apache["apache2<br/>read-only, GET/HEAD"]
+    end
+    ts["tailscale serve<br/>HTTPS, tailnet only"]
+    client["Phone / browser<br/>report + kit.js + DuckDB-WASM"]
+    cdn["jsDelivr"]
+
+    omb -- writes --> botdb
+    jobs -- "scheduled writes" --> botdb
+    sync -. "watches for changes" .-> botdb
+    botdb -- "on change: copy,<br/>never the live file" --> sync
+    sync -- "snapshot + catalog" --> webroot
+    sync -. "watches reports/, lib/<br/>updates icons, manifests, import maps" .-> webroot
+    webroot --> apache
+    apache --> ts
+    client -. "checks ETags<br/>every 15 s" .-> ts
+    ts -- "pages, kit, snapshots" --> client
+    cdn -- "DuckDB-WASM" --> client
 ```
-┌──────────────────────── the machine ────────────────────────────────────────┐
-│                                                                             │
-│  openmausbot.service (you)          webdata-jobs.service (you, sandboxed)   │
-│   bots → bots/<id>/data.duckdb ◀──── jobs/<name>/run.py → validate → apply  │
-│              │                                                              │
-│              ▼  copy (never opens the live file)                            │
-│  webdata-sync.service (you, sandboxed)                                      │
-│   webroot/data/<bot>.duckdb · data/catalog.json · reports/index.json        │
-│   report icons + manifests · versioned module block in every page           │
-│              │                                                              │
-│              ▼                                                              │
-│  apache2 (www-data): webroot/ read-only, GET/HEAD, LISTEN_IP:LISTEN_PORT    │
-│              │                                                              │
-└──────────────┼──────────────────────────────────────────────────────────────┘
-               ▼  tailscale serve (HTTPS :8443) → tailnet only
-        phone / browser: report HTML + /lib/kit.js + DuckDB-WASM (jsDelivr)
-```
+
+Dotted lines are polling: nothing pushes changes downstream. `webdata-sync`
+checks the bots' databases and the report files every 3 s, and open pages check
+the published files' ETags every 15 s (see [Data flow](#data-flow)).
+
+The three services run as you; `webdata-sync` and `webdata-jobs` are
+sandboxed (see [Security model](#security-model)). Apache runs as `www-data`
+and listens only on `LISTEN_IP:LISTEN_PORT`.
 
 | Part | Where | What it does |
 |---|---|---|

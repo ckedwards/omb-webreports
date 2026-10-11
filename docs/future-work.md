@@ -119,9 +119,10 @@ Three things can stack up:
 
 - **Calls per run.** A script that loops over pages and calls `webdata-browse`
   for each one starts a new Chrome per page.
-- **Jobs at the same minute.** The scheduler (`webdata-job daemon`) starts every
-  job due in a minute at once, with no limit, so three browser jobs on the same
-  schedule mean three Chromes at the same moment.
+- **Jobs at the same minute.** The scheduler (`webdata-job daemon`) starts each
+  job a fixed 0–50 s into its minute (from the job's name), which spreads out
+  start-ups. But there's no limit on how many run at once: browser jobs that
+  take longer than the gap between their start times still overlap.
 - **The bake that follows.** A job that changes data triggers a snapshot and then
   a Chrome bake of every report using it, shortly after the job's own browsers.
 
@@ -134,8 +135,9 @@ or memory limits, so a burst competes with OpenMausBot and Apache.
   `webdata-data-job` skill lists APIs, CSV/JSON files and plain HTML ahead of
   `webdata-browse`, and tells bots to look for the API a page calls before
   rendering it.
-- The skill already steers schedules off minute 0 ("hourly" → `7 * * * *`),
-  which spreads jobs out.
+- Jobs due in the same minute already start spread across it (0–50 s, fixed
+  per job), and the skill steers schedules off minute 0 ("hourly" →
+  `7 * * * *`), which spreads them across the hour.
 - A typical browser job makes one call per run: a few CPU-seconds per run.
 
 ### Ideas, most valuable first
@@ -150,9 +152,7 @@ or memory limits, so a burst competes with OpenMausBot and Apache.
 3. **Resource limits.** `MemoryHigh`/`MemoryMax` and `CPUWeight` on the
    `webdata-jobs` and `webdata-sync` units (in `admin/install.sh`), so a runaway
    Chrome can't starve OpenMausBot or Apache.
-4. **Stagger jobs.** Have the daemon spread jobs due in the same minute by a few
-   seconds each, or have the skill pick a minute no other job uses.
-5. **A cache per job.** Give each job its own persistent browser profile with a
+4. **A cache per job.** Give each job its own persistent browser profile with a
    disk cache, so heavy pages don't re-download their scripts and images every
    run. This gives up some of the clean-slate isolation of a fresh profile, so
    only do it for sources that need it.

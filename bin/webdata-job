@@ -23,6 +23,9 @@
 //   webdata-job notify-test <bot>          send a test event to the bot's webhook
 //   webdata-job daemon                     the scheduler (webdata-jobs.service)
 //
+// Scheduled runs start a fixed 0-50 s into their minute (from the job's name),
+// so jobs due in the same minute don't all start at once.
+//
 // Failure notifications: jobs/.notify.env (chmod 600) maps a bot to an
 // OpenMausBot webhook URL, one per line: MyBot=http://127.0.0.1:8800/hooks/wh_.../whsec_...
 // When a scheduled run fails, the runner POSTs the job, error and log tail
@@ -33,6 +36,7 @@
 // upsert (replace rows with the same key, add new ones; needs a key).
 
 import { spawn } from 'node:child_process';
+import crypto from 'node:crypto';
 import fs from 'node:fs';
 import { createRequire } from 'node:module';
 import os from 'node:os';
@@ -137,6 +141,13 @@ function nextRuns(cron, tz, count = 1, from = new Date()) {
   }
   return out;
 }
+
+// Jobs due in the same minute would otherwise all start at once, and with them
+// any headless Chrome they launch. Each job instead starts a fixed number of
+// seconds into its scheduled minute, derived from its name: spread out, but
+// the same on every run and across restarts.
+const START_SPREAD_S = 50;
+const startOffset = (name) => crypto.createHash('sha1').update(name).digest().readUInt32BE(0) % (START_SPREAD_S + 1);
 
 const fmtTime = (d, tz) => d.toLocaleString('en-CA', { timeZone: tz, dateStyle: 'short', timeStyle: 'short', hourCycle: 'h23' }) + ` ${tz}`;
 
@@ -481,9 +492,16 @@ async function daemon() {
       if (!job.enabled || running.has(name) || lastFired.get(name) === minute || !cronMatches(job.cron, now, job.timezone)) continue;
       lastFired.set(name, minute);
       running.add(name);
-      console.log(`${stamp()} ${name}: starting`);
-      runJob(job, { trigger: 'schedule' })
-        .then((r) => console.log(`${stamp()} ${name}: ${r.ok ? 'ok' : `FAILED: ${r.error}`}`))
+      const delay = Math.max(0, startOffset(name) * 1000 - (Date.now() % 60_000));
+      sleep(delay)
+        .then(() => {
+          // Re-read: the job may have been edited or disabled while it waited.
+          const current = loadJob(name);
+          if (!current.enabled) return;
+          console.log(`${stamp()} ${name}: starting`);
+          return runJob(current, { trigger: 'schedule' })
+            .then((r) => console.log(`${stamp()} ${name}: ${r.ok ? 'ok' : `FAILED: ${r.error}`}`));
+        })
         .catch((e) => console.log(`${stamp()} ${name}: ${e.message}`))
         .finally(() => running.delete(name));
     }
@@ -558,7 +576,7 @@ const commands = {
       const next = job.enabled ? nextRuns(job.cron, job.timezone, 1)[0] : null;
       const last = st.last_finished ? `${st.last_ok ? 'ok' : `FAILED${st.consecutive_failures > 1 ? ` ×${st.consecutive_failures}` : ''}`} ${ago(st.last_finished)}` : 'never run';
       console.log(`${name}  ${job.enabled ? 'enabled ' : 'DISABLED'}  "${job.schedule}" ${job.timezone}  bot ${job.bot.name} → ${Object.keys(job.tables).join(', ')}`);
-      console.log(`    last: ${st.running ? 'RUNNING now' : last}${st.last_error && !st.last_ok ? ` (${st.last_error})` : ''}   next: ${next ? fmtTime(next, job.timezone) : '-'}`);
+      console.log(`    last: ${st.running ? 'RUNNING now' : last}${st.last_error && !st.last_ok ? ` (${st.last_error})` : ''}   next: ${next ? `${fmtTime(next, job.timezone)} +${startOffset(name)}s` : '-'}`);
       if (job.description) console.log(`    ${job.description}`);
     }
   },
@@ -567,7 +585,7 @@ const commands = {
     const job = loadJob(name);
     console.log(fs.readFileSync(path.join(job.dir, 'job.json'), 'utf8').trim());
     console.log(`\nvalid · script: ${job.command ?? job.script} · bot database: ${job.bot.db}`);
-    console.log(`next runs (${job.enabled ? 'enabled' : 'DISABLED: these would be the times'}):`);
+    console.log(`next runs (${job.enabled ? 'enabled' : 'DISABLED: these would be the times'}), each starting ${startOffset(name)} s into the minute:`);
     for (const d of nextRuns(job.cron, job.timezone, 5)) console.log(`  ${fmtTime(d, job.timezone)}  (${d.toISOString().slice(0, 16)}Z)`);
   },
 

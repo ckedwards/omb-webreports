@@ -48,7 +48,10 @@ The script writes one file per declared table into `$WEBDATA_OUT`
 
 ## What happens on a run
 
-1. The script runs in the job folder with a timeout, output logged.
+1. The script runs in the job folder with a timeout, output logged. It
+   starts a fixed number of seconds (0–50) into its scheduled minute, worked
+   out from the job's name, so jobs due in the same minute start spread out
+   rather than all at once. `webdata-job list` shows it as `next: … +29s`.
 2. Every declared table is loaded and checked: present, at least `min_rows`
    rows, upsert keys unique and non-null, **columns and types unchanged** from
    the current table (reports depend on them).
@@ -64,8 +67,7 @@ Jobs run inside the `webdata-jobs` sandbox: only the checkout, OpenMausBot's
 standard library or Node built-ins (no package installs). For pages that need
 JavaScript to render, scripts call `webdata-browse`, which runs headless Chrome
 with a fresh profile per call. That costs ~1 s and a few CPU-seconds per call,
-and jobs due in the same minute run at the same time, so prefer an API or file
-over a browser, and keep browser calls per run few. Limits worth adding if
+so prefer an API or file over a browser, and keep browser calls per run few. Limits worth adding if
 browser jobs multiply are in
 [future-work.md](future-work.md#browser-use-in-scheduled-jobs).
 

@@ -291,7 +291,8 @@ Deterministic refreshes of a bot's tables, with no AI at run time.
 tables (`replace`, `append`, or `upsert` with a `key`) and `enabled`; `run.py`
 (or `run.mjs`/`run.sh`) writes one file per table to `$WEBDATA_OUT`.
 `webdata-jobs.service` runs `bin/webdata-job daemon`, checks every minute, and
-for each due job: runs the script (timeout, logs) → stages and validates every
+for each due job, starting it a fixed 0–50 s into the minute (from its name, so
+jobs due together don't all start at once): runs the script (timeout, logs) → stages and validates every
 table (row counts, unique keys, columns unchanged vs the current table) → waits
 until OpenMausBot isn't holding the bot's database (it keeps it open 10 min after
 use; DuckDB allows one writer) → applies everything in one transaction

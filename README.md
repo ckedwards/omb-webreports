@@ -18,8 +18,9 @@ changes. Save any report to your iPhone home screen and it behaves like an app.
 
 ## What you get
 
-- **Reports your bots can build.** Ask a bot "make a report of …" and it writes a
-  report from a template, using a shared kit (DuckDB-WASM, Observable Plot,
+- **Reports your bots can build.** Ask a bot "make a report of …" or "make me a
+  page with Cary's news, weather and the local team's results" and it writes an
+  analysis report or a briefing from a template, using a shared kit (DuckDB-WASM, Observable Plot,
   sortable tables, stat tiles) and a documented design system, then checks it
   in a headless phone browser in light and dark mode before handing you the link.
 - **Live data, no deploys.** When a bot's data changes, its database is

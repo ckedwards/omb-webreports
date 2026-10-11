@@ -363,6 +363,7 @@ export function report({ databases = [], render, poll = POLL_MS, warm = true }) 
       if (pageTag && page.tag !== pageTag) { location.reload(); return; }
       if (changed) await draw('data');
       else setStatus('ok', updatedText());
+      refreshFreshness();
     } catch (err) {
       setStatus('error', 'Offline');
       console.warn(err);
@@ -542,6 +543,66 @@ export function empty(el, text = 'No data yet.') {
   el.replaceChildren(node('p', 'empty', text));
 }
 
+/** Only absolute http(s) URLs may become links: data from feeds and scraped
+ *  pages is untrusted, and a javascript: URL in href would run in this page.
+ *  Relative URLs are refused too: from a scraped page they'd point at this site. */
+function safeUrl(url) {
+  if (typeof url !== 'string' || !url) return null;
+  try {
+    const u = new URL(url.trim());
+    return u.protocol === 'http:' || u.protocol === 'https:' ? u.href : null;
+  } catch { return null; }
+}
+
+/**
+ * A list of items: headlines, results, upcoming events.
+ * items: [{ title, url?, source?, time?, meta?, summary? }]
+ *   url      the title links to it (opens outside the page); only absolute
+ *            http(s) URLs are linked, anything else shows as plain text
+ *   source   e.g. the publication; time: a Date, shown as "3 hours ago" / "in 2 days"
+ *   meta     any other short text for the grey line ("Final", "Home")
+ *   summary  one or two sentences, clamped to two lines
+ */
+export function feed(el, items, { empty: emptyText = 'Nothing here right now.' } = {}) {
+  if (!items.length) { empty(el, emptyText); return; }
+  const list = node('ul', 'feed');
+  for (const it of items) {
+    const li = node('li');
+    const href = safeUrl(it.url);
+    const title = node(href ? 'a' : 'span', 'title', it.title ?? '');
+    if (href) Object.assign(title, { href, target: '_blank', rel: 'noopener noreferrer' });
+    li.append(title);
+    const meta = [it.source, it.time != null ? fmt.ago(it.time) : null, it.meta].filter(Boolean).join(' · ');
+    if (meta) li.append(node('div', 'meta', meta));
+    if (it.summary) li.append(node('p', 'summary', it.summary));
+    list.append(li);
+  }
+  el.replaceChildren(list);
+}
+
+/**
+ * "Updated 12 minutes ago" for one section, from when its data was collected
+ * (the newest fetched_at). Older than staleAfter minutes, it becomes a warning:
+ * the source, or the job collecting it, has probably stopped working. The text
+ * stays current while the page is open (report() refreshes it on every check).
+ */
+export function freshness(el, when, { staleAfter = null } = {}) {
+  el.classList.add('freshness');
+  el.dataset.when = when == null ? '' : String(new Date(when).getTime());
+  el.dataset.staleAfter = staleAfter ?? '';
+  paintFreshness(el);
+}
+
+function paintFreshness(el) {
+  const when = el.dataset.when ? Number(el.dataset.when) : null;
+  const limit = el.dataset.staleAfter ? Number(el.dataset.staleAfter) : null;
+  const stale = when == null || (limit != null && Date.now() - when > limit * 60_000);
+  el.classList.toggle('stale', stale);
+  el.textContent = when == null ? 'Not collected yet'
+    : `Updated ${fmt.ago(when)}${stale ? ' · may be out of date' : ''}`;
+}
+const refreshFreshness = () => document.querySelectorAll('.freshness[data-when]').forEach(paintFreshness);
+
 // ---------------------------------------------------------------- tables
 
 /**
@@ -609,13 +670,14 @@ export const fmt = {
   rate: (n, digits = 3) => n == null ? '–' : Number(n).toFixed(digits).replace(/^0(?=\.)/, ''),
   date: (d) => d == null ? '–' : new Date(d).toLocaleDateString(undefined, { year: 'numeric', month: 'short', day: 'numeric' }),
   datetime: (d) => d == null ? '–' : new Date(d).toLocaleString(undefined, { dateStyle: 'medium', timeStyle: 'short' }),
-  /** "3 min ago" */
+  /** "3 minutes ago", or "in 2 hours" for a future time */
   ago(d) {
+    if (d == null) return '–';
     const s = (Date.now() - new Date(d).getTime()) / 1000;
-    if (s < 45) return 'just now';
+    if (!(Math.abs(s) >= 45)) return 'just now';
     const rtf = new Intl.RelativeTimeFormat(undefined, { numeric: 'auto' });
     for (const [unit, secs] of [['day', 86400], ['hour', 3600], ['minute', 60]]) {
-      if (s >= secs) return rtf.format(-Math.round(s / secs), unit);
+      if (Math.abs(s) >= secs) return rtf.format(-Math.round(s / secs), unit);
     }
     return 'just now';
   },

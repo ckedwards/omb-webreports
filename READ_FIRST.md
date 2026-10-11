@@ -89,8 +89,13 @@ webdata-new-report jays-pitching "Jays Pitching" mybot "Starters vs. bullpen"
 ```
 
 That creates `webroot/reports/<slug>/` with a working table explorer.
-Replace the body with the real report. **Read `ROOT/DESIGN.md` first**
-(how reports look and read), then use the live references:
+Replace the body with the real report. There are two page shapes: an
+**analysis report** (stat tiles, charts, tables from collected data) and a
+**briefing** (current items from several sources, such as news, weather and
+scores, each card with its own freshness); DESIGN.md §2 has both. Briefings
+need a data job per source to stay current, and `fetched_at` on every row.
+**Read `ROOT/DESIGN.md` first** (how reports look and read), then use the
+live references:
 `webroot/reports/_gallery/` (every component and chart form, one copyable
 function each; SITE/reports/_gallery/) and
 `examples/reports/blue-jays-2026/` (a complete real report).
@@ -170,7 +175,7 @@ Exploring data: `webdata-ls` (what exists), `webdata-ls data`
 
 ```js
 import { report, query, chart, legend, table, stats, stat, segmented, empty,
-         colors, fmt, getJSON, watch } from '/lib/kit.js';
+         feed, freshness, colors, fmt, getJSON, watch } from '/lib/kit.js';
 
 const app = report({
   databases: ['mybot'],          // ATTACH /data/mybot.duckdb AS mybot (READ_ONLY)
@@ -223,10 +228,18 @@ someSelect.onchange = () => app.redraw();   // re-render after a control changes
 - `segmented(groupEl, { onChange })`: `.segmented` tabs (panels by id) or filters;
   returns `{ value }`.
 - `empty(el, text)`: empty-state message.
+- `feed(el, [{title, url?, source?, time?, meta?, summary?}], {empty})`: a list
+  of headlines, results or events (briefing pages). Only absolute `http(s)`
+  URLs become links (opening outside the page); never build an `href` from
+  data yourself.
+- `freshness(el, when, {staleAfter})`: "Updated 12 minutes ago" for one
+  section, from its newest `fetched_at`; a warning past `staleAfter` minutes.
+  Kept current while the page is open.
 - `table(el, rows, [{key, label?, format?, numeric?}], {sort, desc})`:
   sortable, numbers right-aligned in tabular figures, nulls sort last.
 - `fmt.num(n, digits?)`, `fmt.compact` (12.9K), `fmt.pct` (0.488 → 48.8%),
-  `fmt.rate` (.262), `fmt.date`, `fmt.datetime`, `fmt.ago`.
+  `fmt.rate` (.262), `fmt.date`, `fmt.datetime`, `fmt.ago` ("3 hours ago",
+  "in 2 days").
 - `watch(urls, onChange)`, `getJSON(url)`: for pages that read JSON
   (the front page uses these).
 

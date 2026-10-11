@@ -20,7 +20,8 @@ colorblind-safe set; don't add colors.
 1. **Phone first.** Designed at ~390px wide, read with a thumb. Desktop is a
    bonus (the grid widens on its own).
 2. **One question per report.** The title names the subject, the first screen
-   answers the question, everything below supports it.
+   answers the question, everything below supports it. (A briefing's
+   "question" is its place or topic: "Cary today".)
 3. **The number is the hero.** If the story is one number, show a stat tile,
    not a chart. Charts earn their place by showing shape: change, rank, spread.
 4. **Quiet chrome, loud data.** Hairline grids, muted axes, thin marks. Color
@@ -29,6 +30,15 @@ colorblind-safe set; don't add colors.
    that looks different from the others is wrong, even if it looks good.
 
 ## 2. Page anatomy
+
+There are two page shapes. Pick one before building:
+
+- **Analysis report**: answers a question from collected data with stat tiles,
+  charts and tables ("How are the Blue Jays doing?"). The anatomy just below.
+- **Briefing**: current items from several sources on one page: headlines,
+  weather, latest results ("Cary today"). See [Briefing pages](#briefing-pages).
+
+### Analysis report
 
 ```
 ┌ app header ─────────────────────┐  ‹ back · title · "Data updated 3 min ago"
@@ -51,6 +61,35 @@ colorblind-safe set; don't add colors.
 - **Order:** answer → explanation → detail. Don't open with a table.
 - A section title between groups (`<h2>` + muted `<p>`) is fine on long
   reports; most reports don't need one.
+
+### Briefing pages
+
+```
+┌ app header ─────────────────────┐  ‹ back · title · "Data updated 3 min ago"
+│ stat tiles (0–4)                │  the at-a-glance numbers: temperature now, high/low, next game
+│ one card per source             │  .grid: header = what it is + freshness(), body = feed(),
+│   headlines · forecast ·        │  a small chart or a table
+│   results · upcoming …          │
+└─────────────────────────────────┘
+```
+
+- **One card per source** (or per table), in order of what the reader checks
+  first. Each card's header shows its own freshness with
+  `freshness(el, newestFetchedAt, { staleAfter })`; sources update on their own
+  schedules and fail separately, so one stale section mustn't look like the
+  whole page is stale. `staleAfter` ≈ 3 × that source's job interval.
+- **Lists** use `feed()`: title, a grey line (source · time · status), an
+  optional one-to-two-sentence summary. 5–10 items per card; the data job keeps
+  only current items, so the page doesn't filter by date.
+- **No images** from sources: they load from other sites (privacy, broken
+  links, layout jumps) and crowd a phone screen. Text only.
+- **Links** go to the source and open outside the page; only `feed()` makes
+  links from data (it accepts absolute `http(s)` URLs only). Never build an
+  `href` from data yourself.
+- **Charts** only where shape matters (a 24-hour temperature line); otherwise
+  a feed or a short table. The chart rules in §6 still apply.
+- Each card handles its own empty case (`feed()` takes an `empty` message):
+  "No headlines right now." rather than a blank card.
 
 ### Card anatomy
 
@@ -170,6 +209,30 @@ Don't add spinners or skeletons.
 
 **Inputs**: `<select>` and `<input type="search">` are styled by kit.css; put
 them in the `.filters` row.
+
+**Feed** (briefings): `feed(el, items, { empty })`, a list of headlines,
+results or events:
+
+```js
+feed($('news'), rows.map((r) => ({
+  title: r.title,            // the line people read
+  url: r.url,                // optional; absolute http(s) only, opens outside the page
+  source: r.source,          // optional; grey line
+  time: r.published,         // optional Date; "3 hours ago" / "in 2 days"
+  meta: 'Final',             // optional extra grey text
+  summary: r.summary,        // optional; clamped to two lines
+})), { empty: 'No headlines right now.' });
+```
+
+**Freshness** (briefings): `freshness(el, when, { staleAfter })` on the card
+header's `<p>`: "Updated 12 minutes ago". Past `staleAfter` minutes it adds a
+warning dot and "may be out of date"; with no data it says "Not collected yet".
+`when` is the newest `fetched_at` in that card's rows:
+
+```js
+const newest = (rows, key) => rows.reduce((m, r) => (r[key] > m ? r[key] : m), null);
+freshness($('news-updated'), newest(rows, 'fetched_at'), { staleAfter: 180 }); // hourly job
+```
 
 ## 6. Charts
 
@@ -309,7 +372,9 @@ shrinking the font.
 - [ ] Looked at `light.png` **and** `dark.png`: nothing overlaps, clips or
       overflows; no empty cards; labels readable.
 - [ ] First screen answers the report's question.
-- [ ] 3–6 tiles, 2–6 charts, a table with the chart numbers.
+- [ ] Analysis report: 3–6 tiles, 2–6 charts, a table with the chart numbers.
+- [ ] Briefing: one card per source, each with `freshness()` and an empty
+      message; lists through `feed()`; no images; no links built by hand.
 - [ ] Every chart form is the one the table in §6 picks; no dual axes.
 - [ ] Colors from `colors()`/tokens only; series in order, pinned by domain.
 - [ ] All numbers through `fmt`; units in subtitles; deltas name their comparison.

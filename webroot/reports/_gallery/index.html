@@ -8,11 +8,11 @@
 <title>Design gallery</title>
 <meta name="theme-color" content="#f9f9f7" media="(prefers-color-scheme: light)">
 <meta name="theme-color" content="#0d0d0d" media="(prefers-color-scheme: dark)">
-<link rel="stylesheet" href="/lib/kit.css?v=4e82d8438331">
+<link rel="stylesheet" href="/lib/kit.css?v=1b4d32be28f4">
 <link rel="preconnect" href="https://cdn.jsdelivr.net" crossorigin>
 <!-- webdata:modules: written by webdata-sync (versioned module URLs); do not edit -->
-<script type="importmap">{"imports":{"/lib/kit.js":"/lib/kit.js?v=cd586a723fa5"}}</script>
-<link rel="modulepreload" href="/lib/kit.js?v=cd586a723fa5">
+<script type="importmap">{"imports":{"/lib/kit.js":"/lib/kit.js?v=6eca12373fac"}}</script>
+<link rel="modulepreload" href="/lib/kit.js?v=6eca12373fac">
 <!-- /webdata:modules -->
 <script defer src="/lib/vendor/d3.min.js?v=6d64bd2f0944"></script>
 <script defer src="/lib/vendor/plot.umd.min.js?v=39a027889cfd"></script>
@@ -111,6 +111,24 @@
     <div id="tab-pages" hidden></div>
   </article>
 
+  <!-- ======================================================= briefing -->
+  <div class="section-title"><h2>Briefing pages</h2><p>Current items from several sources · feed(), freshness()</p></div>
+  <section class="grid stats" id="conditions" aria-label="Current conditions"></section>
+  <section class="grid">
+    <article class="card">
+      <header><h2>Headlines</h2><p id="news-updated"></p></header>
+      <div id="news"></div>
+    </article>
+    <article class="card">
+      <header><h2>Next 24 hours</h2><p id="forecast-updated"></p></header>
+      <div id="forecast"></div>
+    </article>
+    <article class="card">
+      <header><h2>Recent results</h2><p id="results-updated"></p></header>
+      <div id="results"></div>
+    </article>
+  </section>
+
   <!-- ======================================================= states -->
   <section class="grid">
     <article class="card">
@@ -139,7 +157,7 @@
 </main>
 
 <script type="module">
-import { report, chart, legend, table, stats, segmented, empty, colors, fmt } from '/lib/kit.js';
+import { report, chart, legend, table, stats, segmented, empty, feed, freshness, colors, fmt } from '/lib/kit.js';
 
 const $ = (id) => document.getElementById(id);
 const REGIONS = ['North', 'South', 'West'];   // fixed order = fixed colors
@@ -170,6 +188,32 @@ const SQL = {
     FROM range(DATE '2026-01-01', DATE '2026-10-01', INTERVAL 1 MONTH) t(m),
          (VALUES ('Search', 3, 30), ('Social', 2, 10), ('Email', 1, 0)) c(name, k, base)
     ORDER BY n, channel`,
+  // Briefing tables, as a data job would write them (replace mode): only the
+  // current items, each row carrying fetched_at, when the job collected it.
+  // The gallery fakes times relative to now(); a real page just reads the table.
+  news: `
+    SELECT title, url, source, now()::TIMESTAMP - to_minutes(age) AS published, summary,
+           now()::TIMESTAMP - INTERVAL 12 MINUTE AS fetched_at
+    FROM (VALUES
+      ('Town council approves greenway extension', 'https://example.com/news/greenway', 'Example Gazette', 35,
+       'The new segment links two parks; construction starts in the spring.'),
+      ('Library adds Sunday hours through the winter', 'https://example.com/news/library', 'Example Gazette', 140, NULL),
+      ('Lane closures on Main Street this week', 'https://example.org/traffic', 'Example Traffic', 290,
+       'Expect delays between 9am and 3pm, Monday to Thursday, while crews repave.'),
+      ('Farmers market moves indoors for the season', NULL, 'Community board', 1500, NULL)
+    ) t(title, url, source, age, summary)
+    ORDER BY published DESC`,
+  forecast: `
+    SELECT date_trunc('hour', now()::TIMESTAMP) + to_hours(i) AS hour,
+           round(16 + 6 * sin((i - 3) / 3.8), 0)::DOUBLE AS temp,
+           now()::TIMESTAMP - INTERVAL 20 MINUTE AS fetched_at
+    FROM range(0, 25) t(i) ORDER BY hour`,
+  results: `
+    SELECT home, home_score, away, away_score, now()::TIMESTAMP - to_hours(age) AS played,
+           now()::TIMESTAMP - INTERVAL 50 HOUR AS fetched_at
+    FROM (VALUES ('Cary Hawks', 5, 'Riverside', 3, 51), ('Lakeview', 2, 'Cary Hawks', 2, 75),
+                 ('Cary Hawks', 1, 'Northgate', 4, 99)) t(home, home_score, away, away_score, age)
+    ORDER BY played DESC`,
 };
 
 // ---------------------------------------------------------------- recipes (one function each)
@@ -388,6 +432,60 @@ function tables(rows, pages) {
   ], { sort: 'views' });
 }
 
+// ---------------------------------------------------------------- briefing recipes
+// One card per source; its header says how fresh that source is, from the
+// newest fetched_at. staleAfter ≈ 3 × the job's interval.
+
+const newest = (rows, key) => rows.reduce((m, r) => (r[key] > m ? r[key] : m), null);
+
+/** Current conditions: stat tiles, the first screen of a briefing. */
+function conditions(el, hours) {
+  const now = hours[0];
+  const temps = hours.map((h) => h.temp);
+  stats(el, [
+    { label: 'Now', value: `${fmt.num(now.temp, 0)}°`, note: 'Partly cloudy' },
+    { label: 'High / low', value: `${fmt.num(Math.max(...temps), 0)}° / ${fmt.num(Math.min(...temps), 0)}°`, note: 'Next 24 hours' },
+    { label: 'Rain', value: '20%', note: 'After 6pm' },
+  ]);
+}
+
+/** Headlines: feed() with links; only http(s) URLs become links. */
+function headlines(el, updatedEl, rows) {
+  freshness(updatedEl, newest(rows, 'fetched_at'), { staleAfter: 180 });   // hourly job
+  feed(el, rows.map((r) => ({ title: r.title, url: r.url, source: r.source, time: r.published, summary: r.summary })),
+    { empty: 'No headlines right now.' });
+}
+
+/** Forecast: a short line chart, high and low labelled above the line (below it, a label would hit the axis). */
+function forecastChart(el, updatedEl, rows, c) {
+  freshness(updatedEl, newest(rows, 'fetched_at'), { staleAfter: 90 });    // every 30 minutes
+  const hi = rows.reduce((a, b) => (b.temp > a.temp ? b : a));
+  const lo = rows.reduce((a, b) => (b.temp < a.temp ? b : a));
+  const hour = (d) => new Date(d).toLocaleTimeString(undefined, { hour: 'numeric' });
+  chart(el, {
+    height: 180, marginLeft: 32, marginRight: 16,
+    y: { grid: true, ticks: 3, label: null, tickFormat: (v) => `${v}°` },
+    x: { ticks: 4, label: null, tickFormat: hour },
+    marks: [
+      Plot.lineY(rows, { x: 'hour', y: 'temp', stroke: c.series[0], strokeWidth: 2 }),
+      Plot.text([hi], { x: 'hour', y: 'temp', text: (d) => `${d.temp}°`, dy: -10, fill: c.ink2 }),
+      Plot.text([lo], { x: 'hour', y: 'temp', text: (d) => `${d.temp}°`, dy: -10, fill: c.ink2 }),
+      Plot.ruleX(rows, Plot.pointerX({ x: 'hour', stroke: c.axis })),
+      Plot.tip(rows, Plot.pointerX({ x: 'hour', y: 'temp', format: { x: hour, y: (v) => `${v}°` } })),
+    ],
+  });
+}
+
+/** Results: feed() without links; this source is out of date on purpose,
+ *  to show the warning (fetched 50 hours ago, daily job). */
+function recentResults(el, updatedEl, rows) {
+  freshness(updatedEl, newest(rows, 'fetched_at'), { staleAfter: 36 * 60 });
+  feed(el, rows.map((r) => ({
+    title: `${r.home} ${r.home_score}, ${r.away} ${r.away_score}`,
+    meta: 'Final', time: r.played,
+  })), { empty: 'No games in the last week.' });
+}
+
 function swatches(el) {
   const groups = [
     ['Surfaces & ink', ['--page', '--surface', '--surface-2', '--ink', '--ink-2', '--muted', '--grid', '--axis', '--accent']],
@@ -423,8 +521,9 @@ const app = report({
   async render(db) {
     const c = colors();
     const n = Number(period.value);
-    const [days, regions, pages, months] = await Promise.all([
+    const [days, regions, pages, months, news, forecast, results] = await Promise.all([
       db.query(SQL.days(n)), db.query(SQL.regions(n)), db.query(SQL.pages), db.query(SQL.months),
+      db.query(SQL.news), db.query(SQL.forecast), db.query(SQL.results),
     ]);
     headline($('stats'), days);
     trend($('trend'), days, c);
@@ -437,6 +536,10 @@ const app = report({
     scatter($('scatter'), pages, c);
     multiples($('multiples'), regions, c);
     tables(regions, pages);
+    conditions($('conditions'), forecast);
+    headlines($('news'), $('news-updated'), news);
+    forecastChart($('forecast'), $('forecast-updated'), forecast, c);
+    recentResults($('results'), $('results-updated'), results);
     empty($('empty'), 'No games scheduled this week.');
     swatches($('swatches'));
   },

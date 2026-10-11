@@ -57,7 +57,8 @@ webdata-sql "DESCRIBE <db>.main.<table>"
 - **Name**: lowercase-kebab-case, what it refreshes: `jays-stats-hourly`.
 - **Tables and modes** (only tables in your own database's `main` schema):
   - `replace`: the table is the current state (standings, a leaderboard,
-    season totals). The whole table is rewritten each run.
+    season totals, today's headlines, the forecast, the latest results). The
+    whole table is rewritten each run. The usual mode for briefing pages.
   - `upsert` with a `key`: the table accumulates history (one row per entity
     per date/hour). Rows with the same key are replaced, new ones added. Use
     this for time series; the key must be unique and non-null in each run's output.
@@ -66,6 +67,9 @@ webdata-sql "DESCRIBE <db>.main.<table>"
   plus an IANA `timezone` (default UTC; the server runs on UTC).
   - "hourly" → `7 * * * *` (pick a minute that isn't 0; fewer pile-ups)
   - "every 15 minutes" → `*/15 * * * *`
+  - Several sources on one briefing page: one job per source, each on the
+    schedule its source changes at (weather every 30 minutes, news hourly,
+    results daily), rather than one job collecting everything at the fastest rate.
   - "daily at 6am" → `0 6 * * *` with the person's timezone
   - "weekdays at 9" → `0 9 * * mon-fri`
   - If a time of day matters and you don't know their timezone, ask.
@@ -98,6 +102,16 @@ table is produced and passes the checks.
   `fetch`. Installing packages is not possible: jobs run in a sandbox where only
   `ROOT`, the bots' database folders and a private `/tmp` are writable.
   For JavaScript-rendered pages use `webdata-browse` (3b), never another browser setup.
+- **`fetched_at`**: if the table has a `fetched_at` column (briefing tables
+  always do), set it on every row to the time of this run, in UTC, written
+  with its zone: `datetime.now(timezone.utc).isoformat(timespec="seconds")`
+  in Python, `new Date().toISOString()` in Node. The page shows it as
+  "Updated 12 minutes ago" and warns when it gets old, which is how a reader
+  notices a broken job. A timestamp without a zone is taken as-is and can be
+  hours off.
+- **Links**: write absolute `http(s)` URLs; resolve relative links against the
+  page they came from (`urllib.parse.urljoin(page_url, href)`). The page
+  refuses anything else as a link.
 - Every request gets a timeout (30s) and a User-Agent; retry a transient
   failure once or twice, then fail. Check that you got what you expected
   (row count in a sane range, required fields present) and `sys.exit("why")`

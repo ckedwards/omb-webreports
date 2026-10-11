@@ -1,6 +1,6 @@
 ---
 name: webdata-report-create
-description: Create a new report page on the omb-webreports site, a self-contained mobile web app with stat tiles, charts and tables that reads live DuckDB data and can be saved to an iPhone home screen. Use when asked to make, build or publish a report, dashboard, scorecard or page from bot data.
+description: Create a new page on the omb-webreports site, a self-contained mobile web app that reads live DuckDB data, updates itself and can be saved to an iPhone home screen. Two shapes, an analysis report (stat tiles, charts, tables) or a briefing of current items from several sources (news, weather, scores, events). Use when asked to make, build or publish a report, dashboard, scorecard, briefing or page from bot data.
 tags: reports, webdata, duckdb, charts
 ---
 
@@ -22,10 +22,21 @@ Read `ROOT/READ_FIRST.md` (mechanics, `kit.js` API) and
 numbers) completely; neither is repeated here. Then open the references:
 - `ROOT/webroot/reports/_gallery/index.html`: every component and chart
   form as one function each (`trend`, `compare`, `ranking`, `columns`,
-  `stacked`, `diverging`, `heatmap`, `scatter`, `multiples`). Copy from it.
+  `stacked`, `diverging`, `heatmap`, `scatter`, `multiples`; for briefings
+  `conditions`, `headlines`, `forecastChart`, `recentResults`). Copy from it.
 - `ROOT/examples/reports/blue-jays-2026/index.html`: a complete real report.
 
-## 2. Make sure the data is published
+## 2. Pick the shape
+
+- **Analysis report**: answers a question from data that has been collected,
+  with stat tiles, charts and tables ("how are the Blue Jays doing").
+- **Briefing**: current items from several sources on one page, each section
+  refreshed on its own schedule ("Cary today: news, weather, the local team's
+  results").
+
+If the request is ambiguous, ask which one they mean. DESIGN.md §2 describes both.
+
+## 3. Make sure the data is published
 
 ```bash
 webdata-ls data
@@ -38,22 +49,42 @@ with your normal data tools (a `main`-schema table with clear column names and
 proper types: numbers as numbers, dates as DATE/TIMESTAMP), then run
 `webdata-ls data` again until it appears.
 
+For a **briefing**, collect each source into its own table (`cary_news`,
+`cary_weather`, `cary_results`), scraping pages if that's where the data is:
+- keep only current items (today's headlines, the coming forecast, recent
+  results), so the page doesn't filter by date;
+- give every row a `fetched_at` TIMESTAMP: when you collected it, in UTC, the
+  same value on every row of that collection. The page shows it as "Updated 12
+  minutes ago";
+- links as absolute `http(s)` URLs (resolve relative links against the page
+  you scraped);
+- choose the columns carefully now: the data job that keeps the table fresh
+  (step 8) must write exactly the same columns and types.
+
 Explore it with the same SQL the browser will run:
 
 ```bash
 webdata-sql "SELECT * FROM <db>.main.<table> LIMIT 20"
 ```
 
-## 3. Plan before writing
+## 4. Plan before writing
 
-Write down, for yourself, following DESIGN.md §2 and §6:
+Write down, for yourself, following DESIGN.md §2 and §6.
+
+An analysis report:
 - the question the report answers and who reads it (on a phone);
 - 3 to 6 stat tiles that answer it on the first screen;
 - 2 to 6 charts, each with its SQL and the form the DESIGN.md §6 table picks
   (never a dual axis);
 - the detail table(s) holding the charts' numbers.
 
-## 4. Scaffold
+A briefing:
+- the sections, one card per source, in the order the reader checks them;
+- for each: its table, its SQL, `feed()` / a small chart / a table, its empty
+  message, and its `staleAfter` (about 3 × how often it will be refreshed);
+- 0 to 4 stat tiles for the at-a-glance numbers (temperature now, next game).
+
+## 5. Scaffold
 
 ```bash
 webdata-new-report <slug> "<Title>" <database> "<one-sentence description>"
@@ -63,7 +94,7 @@ webdata-new-report <slug> "<Title>" <database> "<one-sentence description>"
 because renaming later breaks home-screen installs. This writes `index.html`
 (a working table explorer to replace), `report.json` and a default icon.
 
-## 5. Write the report
+## 6. Write the page
 
 Edit `webroot/reports/<slug>/index.html`:
 - Keep the whole `<head>` from the template (error reporter, home-screen meta
@@ -88,6 +119,12 @@ Edit `webroot/reports/<slug>/index.html`:
 - Words and numbers per DESIGN.md §7: sentence-case titles, units in the card
   subtitle, every number through `fmt`, deltas name their comparison.
 - Insert data text with `textContent` only; never `innerHTML` with data.
+- Briefings: lists through `feed()`, which is the only place links are made
+  from data (it accepts absolute `http(s)` URLs only; never set an `href` from
+  data yourself). Each card's header `<p>` gets
+  `freshness(el, newestFetchedAt, { staleAfter })`. No images from sources.
+  Start from the gallery's briefing recipes (`headlines`, `forecastChart`,
+  `recentResults`, `conditions`).
 - Use only `/lib/` and the vendored d3/Plot. No other libraries or CDNs.
 
 Edit `report.json`: `title`, `short_name` (12 characters or fewer, the
@@ -101,7 +138,7 @@ PNG icons and the manifest are generated for you.
 Don't touch `webroot/lib/`, `webroot/data/`, other reports, generated files
 (`manifest.webmanifest`, `icon-*.png`, `initial.json`, `index.json`) or `ROOT/admin/`.
 
-## 6. Verify, then look
+## 7. Verify, then look
 
 ```bash
 webdata-check <slug>
@@ -114,9 +151,25 @@ overlapping or clipped labels, unreadable colors, empty sections, numbers
 that look wrong. Compare a few numbers against `webdata-sql`. Go through the
 DESIGN.md §10 checklist. Repeat until it is right.
 
-## 7. Hand it over
+## 8. Keep it fresh
+
+Data you collected once goes stale. Use the **webdata-data-job** skill to turn
+each collection into a scheduled script:
+- **Briefing**: required, or the page is out of date by tomorrow. One job per
+  source when they change at different rates (weather every 30 minutes, news
+  hourly, results daily), each table in `replace` mode, each writing
+  `fetched_at`. Propose the jobs and schedules in your reply and create them
+  once the person agrees (the data-job skill has the steps and the approval).
+- **Analysis report**: offer it when the data came from an outside source that
+  keeps changing ("keep the stats updated daily?"): `upsert` for history,
+  `replace` for current totals.
+
+Skip this when the data only changes when the person asks you to change it.
+
+## 9. Hand it over
 
 Reply with the link `SITE/reports/<slug>/`,
-one line on what it shows, and: "On iPhone: open in Safari → Share → Add to
+one line on what it shows, the data jobs that keep it fresh (or the ones you
+propose, waiting for a yes), and: "On iPhone: open in Safari → Share → Add to
 Home Screen." It's also listed on the front page,
 SITE/.

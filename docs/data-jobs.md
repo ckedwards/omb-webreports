@@ -63,7 +63,11 @@ Jobs run inside the `webdata-jobs` sandbox: only the checkout, OpenMausBot's
 `bots/` folder and a private `/tmp` are writable. Scripts use the Python
 standard library or Node built-ins (no package installs). For pages that need
 JavaScript to render, scripts call `webdata-browse`, which runs headless Chrome
-with a fresh profile per call.
+with a fresh profile per call. That costs ~1 s and a few CPU-seconds per call,
+and jobs due in the same minute run at the same time, so prefer an API or file
+over a browser, and keep browser calls per run few. Limits worth adding if
+browser jobs multiply are in
+[future-work.md](future-work.md#browser-use-in-scheduled-jobs).
 
 ## Commands
 

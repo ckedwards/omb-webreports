@@ -120,6 +120,7 @@ From a shell:
 | [docs/architecture.md](docs/architecture.md) | Components, data flow, freshness, security model, design decisions |
 | [docs/operations.md](docs/operations.md) | Day-to-day commands, logs, troubleshooting, upgrades, uninstall |
 | [docs/data-jobs.md](docs/data-jobs.md) | Scheduled data jobs and failure notifications |
+| [docs/future-work.md](docs/future-work.md) | Improvements designed but not built yet, and when they'd be worth it |
 | [READ_FIRST.md](READ_FIRST.md) | The guide agents read before touching reports (also `CLAUDE.md`, `AGENTS.md`) |
 | [DESIGN.md](DESIGN.md) | The design system: layout, tokens, components, chart recipes, words |
 | [skills/](skills/) | Agent Skills for OpenMausBot (SKILL.md format) |

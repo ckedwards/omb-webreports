@@ -136,6 +136,10 @@ where the compile is slower). Choices behind it:
 - *Outdated bakes.* In the seconds between a snapshot and its bake, kit draws
   the older rows marked "Updating…" and redraws with live data once the engine
   is ready. A bake that fails is deleted, so it can never linger.
+- *Chrome on every data change.* A bake costs ~2.2 s and ~5 CPU-seconds, which
+  is negligible at hourly refreshes. Replaying the recorded SQL natively when
+  only data changed would cost milliseconds; it's designed but not built, see
+  [future-work.md](future-work.md#replay-baked-queries-instead-of-re-rendering-in-chrome).
 
 **Scheduled jobs are scripts, not AI.** OpenMausBot routines re-run a bot (with
 AI) on a schedule. Data refreshes should be deterministic, so a bot writes the

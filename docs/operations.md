@@ -14,6 +14,7 @@ webdata-new-report <slug> "<Title>" <bot> "<description>"
 webdata-sync --once                # one sync pass now; prints warnings (bad report.json, …)
 webdata-bake <slug>                # re-bake a report's first render now (the service does this itself)
 webdata-job list                   # scheduled jobs: last result, next run (see data-jobs.md)
+webdata-skills status              # bots with the omb-webreports skills: current or outdated
 ```
 
 ## Services and logs
@@ -97,6 +98,15 @@ either go back to the release the check names, or wait for a DuckDB-WASM build
 and re-run. Snapshots use storage format v1.2.0, which every DuckDB since 1.2
 reads, so a lagging browser can still open them.
 
+**`openmausbot pair` refuses ("does not treat commands on this computer as its
+owner").** Expected with isolation: pair devices in the app, Settings → Remote
+access.
+
+**`webdata-skills` says the session expired, or there is none.** The daily
+timer keeps it alive; if OpenMausBot was down for weeks or the session was
+revoked in the app, create a full-access pairing code in the app (Settings →
+Remote access) and run `sudo webdata-skills login --code <code>`.
+
 **A data job fails.** `webdata-job logs <name>`; see
 [data-jobs.md](data-jobs.md#when-a-job-fails).
 
@@ -110,8 +120,36 @@ git pull
 sudo bash admin/install.sh      # applies changes to Apache/services; safe to repeat
 ```
 
-If the skills changed (`git log -- skills/`), ask your bots to update their
-learned skills from the files.
+The installer ends with `webdata-skills sync`: bots that have the
+omb-webreports skills get the new versions (each stays on or off as it was), and
+the Report builder preset is replaced by the new release. To see what changed
+first: `git log -p -- skills/`; to preview: `webdata-skills sync --dry-run`.
+
+**Bots' skills, by hand** (with `sudo` when OpenMausBot is isolated, the default):
+
+```bash
+sudo webdata-skills status          # each bot: which skills, current or outdated, on/off
+sudo webdata-skills add <bot>       # give a bot the four skills (switched on)
+sudo webdata-skills sync [--dry-run]  # update outdated copies + the preset
+```
+
+They use OpenMausBot's API on this machine (`OMB_URL`, default
+`http://127.0.0.1:8799`) with webdata-skills' own session (see below). Without
+isolation (`OMB_LOOPBACK_TRUST=owner`) no session or `sudo` is needed.
+
+**OpenMausBot isolation** (`OMB_LOOPBACK_TRUST=service`, see
+[architecture](architecture.md#security-model)): `webdata-info` shows whether
+it's on and whether webdata-skills has its session.
+
+```bash
+sudo webdata-skills login               # new session (needs a code from the app once isolated)
+sudo webdata-skills login --code <code> # the same, non-interactively
+sudo webdata-skills logout              # revoke it
+systemctl list-timers webdata-omb-session.timer   # the daily renewal; journalctl -u webdata-omb-session
+```
+
+To turn isolation off: `OMB_LOOPBACK_TRUST=owner` (or empty) in `config.env`,
+then `sudo bash admin/install.sh`.
 
 **OpenMausBot:** always through the script, so its native modules and the
 browser's DuckDB match:
@@ -131,8 +169,11 @@ different DuckDB until a matching build appears.
 ## Uninstall
 
 ```bash
-sudo systemctl disable --now webdata-sync webdata-jobs
-sudo rm /etc/systemd/system/webdata-{sync,jobs}.service
+sudo webdata-skills logout                        # revoke its OpenMausBot session
+sudo systemctl disable --now webdata-sync webdata-jobs webdata-omb-session.timer
+sudo rm /etc/systemd/system/webdata-{sync,jobs}.service /etc/systemd/system/webdata-omb-session.{service,timer}
+sudo rm -r /etc/omb-webreports /etc/systemd/system/openmausbot.service.d/omb-webreports-loopback.conf
+sudo systemctl restart openmausbot                # back to OpenMausBot's default local trust
 sudo rm /etc/systemd/system/apache2.service.d/tailscale.conf
 sudo a2dissite webdata && sudo a2disconf zz-reports-hardening
 sudo rm /etc/apache2/sites-available/webdata.conf /etc/apache2/conf-available/zz-reports-hardening.conf

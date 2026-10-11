@@ -172,6 +172,26 @@ files are skipped for security), so all logic lives in `bin/` and the skills
 call it. Skills contain no machine paths: they run `webdata-info` to learn
 `ROOT` and `SITE`.
 
+**Skills reach bots three ways, and stay current one way.** Each bot keeps its
+own copy of a skill, so editing `skills/` changes nothing by itself.
+- *Preset:* `skills/omb-webreports.openmaus.json` is an OpenMausBot package
+  (its template format) generated from the skill files: the four skills and a
+  "Report builder" preset with standing instructions. Its release only changes
+  when the content does, so re-importing an unchanged package is a no-op.
+- *`webdata-skills add <bot>`* for existing bots, or OpenMausBot's `/learn`.
+- *`webdata-skills sync`* (run by `admin/install.sh` and
+  `admin/openmausbot-upgrade.sh`) compares each bot's copy with the checkout by
+  SHA-256 and replaces outdated ones through OpenMausBot's API (remove, then
+  install the new text; the old copy is put back if that fails), keeping each
+  skill on or off as it was. It imports the current preset release and removes
+  older ones. Only bots that already have an omb-webreports skill are touched.
+
+Trust: a skill that was on stays on with the new text, without a review in the
+app. The text comes from your checkout, the same source `sudo bash
+admin/install.sh` already trusts with root; review `git log -p -- skills/` after
+a pull if you want to read changes first. The API calls are authorized as
+described under "OpenMausBot isolation" below.
+
 ## Security model
 
 What's exposed is a read-only static site on your tailnet. Assumptions: the
@@ -196,6 +216,34 @@ the checkout, or OpenMausBot's data.
 `webdata-sync` can write only the checkout (its headless Chrome for baking
 runs inside the same sandbox, with Chrome's own sandbox on); `webdata-jobs` (and every job
 script) only the checkout and OpenMausBot's `bots/` folder.
+
+**OpenMausBot isolation.** OpenMausBot's API listens on `127.0.0.1`, and by
+default on a self-hosted server it treats any request from this machine without
+a login as its owner (`OMB_LOOPBACK_TRUST=owner`). Bots' shells run on this
+machine, so a bot (say, one steered by a prompt injection in a page it read)
+could switch on its own skills, loosen its own permissions or change settings
+with a `curl`. With `OMB_LOOPBACK_TRUST=service` in `config.env` (the default in
+`config.example.env`), `admin/install.sh` adds a systemd drop-in to
+`openmausbot.service` and OpenMausBot refuses local requests that have no login
+(they keep only health, the bot list and the bots' own per-turn routes, which
+carry their own token). Requests that come through a proxy with forwarded
+headers, such as your phone through `tailscale serve`, were never treated as
+local and use their sessions as before. The webhook receiver (job failure
+notifications) is unaffected.
+- `webdata-skills` then uses **its own full-access OpenMausBot session**,
+  stored in `/etc/omb-webreports/omb-session.json`, readable only by root. Bots
+  run as you and can't use `sudo` without your password, so they can't read it;
+  the admin scripts run as root, and you run `sudo webdata-skills …`.
+- The installer creates the session before switching (while OpenMausBot still
+  mints pairing codes for local requests). Later, `sudo webdata-skills login`
+  needs a code from the app (Settings → Remote access).
+- OpenMausBot ends a session after 30 days without use and after 180 days in
+  any case, so the `webdata-omb-session.timer` (root, daily) uses it to renew it
+  and swaps it for a new one every 30 days, revoking the old one.
+- Side effect: OpenMausBot's own CLI can no longer pair devices or list
+  sessions (`openmausbot pair` explains why); do that in the app instead.
+- Not closed by this (OpenMausBot's own notes): a local caller can still post a
+  message into any bot's thread through the guarded route.
 
 **Jobs.** A job script runs unattended as you, inside that sandbox. The
 data-job skill requires the bot to show you the script and get your explicit

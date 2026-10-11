@@ -21,6 +21,9 @@
 # --skip-browser-check upgrades regardless. After upgrading, it sets
 # DUCKDB_WASM_VERSION in config.env and restarts webdata-sync/webdata-jobs.
 #
+# Skills: finally runs webdata-skills sync, which updates the bots' copies of
+# the omb-webreports skills and the Report builder preset to this checkout.
+#
 # Run it as the user who owns this checkout; it uses sudo where needed.
 # See docs/setup.md.
 set -euo pipefail
@@ -220,3 +223,10 @@ systemctl is-active --quiet "$SERVICE" || {
 }
 echo "$SERVICE is running openmausbot $target"
 journalctl -u "$SERVICE" -n 5 --no-pager
+
+# Bots keep their own copy of each omb-webreports skill; bring them (and the
+# Report builder preset) up to date with this checkout.
+echo
+echo "bots' skills (webdata-skills sync):"
+# As root: when OpenMausBot is isolated, sync uses a root-only session.
+sudo "$ROOT/bin/webdata-skills" sync 2>&1 | sed 's/^/  /' || echo "warning: couldn't update the bots' skills; run: sudo webdata-skills sync" >&2

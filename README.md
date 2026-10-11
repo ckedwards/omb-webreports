@@ -36,10 +36,14 @@ changes. Save any report to your iPhone home screen and it behaves like an app.
   and applied atomically; a failure writes nothing and can ping the bot through
   an OpenMausBot webhook to fix it.
 - **Locked down by default.** Reachable only from your tailnet, read-only
-  (GET/HEAD), no server-side code, hardened Apache, sandboxed services.
+  (GET/HEAD), no server-side code, hardened Apache, sandboxed services. It also
+  isolates OpenMausBot from programs on the machine, so a bot's shell can't use
+  OpenMausBot's local API to change its own skills, permissions or settings.
 - **Agent-ready.** Four [Agent Skills](skills/) (read, create and update reports;
-  schedule data jobs), an agent guide ([READ_FIRST.md](READ_FIRST.md)), a
-  design system ([DESIGN.md](DESIGN.md)) and a live component gallery.
+  schedule data jobs), a "Report builder" preset for OpenMausBot's New bot
+  dialog, an agent guide ([READ_FIRST.md](READ_FIRST.md)), a design system
+  ([DESIGN.md](DESIGN.md)) and a live component gallery. Upgrades keep every
+  bot's copy of the skills current.
 
 ## How it works
 
@@ -115,6 +119,7 @@ From a shell:
 | `webdata-bake <slug>` | re-bake a report's first render now (automatic after changes) |
 | `webdata-job list\|run\|logs\|enable\|disable` | scheduled data jobs |
 | `webdata-browse <url> --eval '<js>'` | headless Chrome for job scripts |
+| `sudo webdata-skills status\|add\|sync` | bots' copies of the skills: which bots, current or outdated, update them |
 
 ## Documentation
 
@@ -140,7 +145,8 @@ config.example.env       settings template → config.env (git-ignored)
 docs/                    user documentation
 examples/reports/        a complete real report to study
 jobs/                    your scheduled data jobs (git-ignored)
-skills/                  Agent Skills for bots
+skills/                  Agent Skills for bots, and omb-webreports.openmaus.json (generated
+                         OpenMausBot package: the skills + the Report builder preset)
 templates/report/        the starter report webdata-new-report copies
 webroot/                 the served site: front page, lib/ (kit), reports/ (yours are git-ignored)
 ```

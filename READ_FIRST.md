@@ -341,8 +341,17 @@ alternative when collection needs judgment (it re-runs the bot, with AI).
 `skills/` holds four agent skills in the open SKILL.md format, kept SKILL.md-only
 because OpenMausBot imports nothing else: `webdata-reports-read`,
 `webdata-report-create`, `webdata-report-update`, `webdata-data-job`. They call the `bin/` helpers
-above. The copies in this repo are the source of truth; a bot's enabled copy is
-whatever was confirmed in the OpenMausBot app, so after editing one here, have
-the bot update its learned skill of the same name.
+above. The copies in this repo are the source of truth; each bot keeps its own
+copy in OpenMausBot. After editing one here:
+
+```bash
+webdata-skills package         # regenerate skills/omb-webreports.openmaus.json (skills + "Report builder" preset)
+sudo webdata-skills sync       # update every bot's outdated copy (on/off kept) and the preset
+```
+
+`sudo webdata-skills status` shows each bot's copies (`sudo`: OpenMausBot is
+isolated from local programs, bots included, and webdata-skills uses a root-only
+session; a bot can't run these, a person does). The package is generated: never
+edit it by hand. Skills contain no machine paths (they run `webdata-info`).
 
 For people (setup, operations, architecture): `README.md` and `docs/`.

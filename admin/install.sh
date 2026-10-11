@@ -42,7 +42,11 @@ SITE_URL=${SITE_URL:-http://$LISTEN_IP:$LISTEN_PORT}
 OMB_DATA_DIR=${OMB_DATA_DIR:-$HOME_DIR/.openmausbot}
 NODE_MODULES_DIR=${NODE_MODULES_DIR:-/usr/lib/node_modules}
 NODE=$(command -v node || true)
-TOOLS=(webdata-info webdata-ls webdata-sql webdata-check webdata-new-report webdata-job webdata-browse webdata-errors webdata-sync webdata-bake)
+OMB_LOOPBACK_TRUST=${OMB_LOOPBACK_TRUST:-}
+[[ $OMB_LOOPBACK_TRUST =~ ^(|owner|service)$ ]] || die "OMB_LOOPBACK_TRUST in config.env must be service, owner or empty"
+OMB_URL=${OMB_URL:-http://127.0.0.1:8799}
+LOOPBACK_DROPIN=/etc/systemd/system/openmausbot.service.d/omb-webreports-loopback.conf
+TOOLS=(webdata-info webdata-ls webdata-sql webdata-check webdata-new-report webdata-job webdata-browse webdata-errors webdata-sync webdata-bake webdata-skills)
 
 # --- preflight ----------------------------------------------------------------
 [[ -n $NODE ]] || die "node not found (Node.js 20+ is required; see docs/setup.md)"
@@ -228,6 +232,49 @@ ReadWritePaths=$ROOT $OMB_DATA_DIR/bots
 WantedBy=multi-user.target
 EOF
 
+# OpenMausBot isolation (OMB_LOOPBACK_TRUST in config.env). With "service",
+# OpenMausBot ignores requests from this machine that have no login, so bots'
+# shells (which run here) can't administer it through its local API.
+# webdata-skills then signs in with its own session, kept root-only in
+# /etc/omb-webreports, and the timer keeps that session valid.
+if [[ -n $OMB_LOOPBACK_TRUST ]]; then
+put "$LOOPBACK_DROPIN" <<EOF
+# Written by omb-webreports admin/install.sh (OMB_LOOPBACK_TRUST in config.env).
+[Service]
+Environment=OMB_LOOPBACK_TRUST=$OMB_LOOPBACK_TRUST
+EOF
+fi
+if [[ $OMB_LOOPBACK_TRUST == service ]]; then
+put /etc/systemd/system/webdata-omb-session.service <<EOF
+# Written by omb-webreports admin/install.sh.
+[Unit]
+Description=omb-webreports: keep webdata-skills' OpenMausBot session valid
+After=openmausbot.service network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=$NODE $ROOT/bin/webdata-skills keepalive
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectSystem=strict
+ProtectHome=read-only
+ReadWritePaths=/etc/omb-webreports
+EOF
+put /etc/systemd/system/webdata-omb-session.timer <<'EOF'
+# Written by omb-webreports admin/install.sh.
+[Unit]
+Description=omb-webreports: renew webdata-skills' OpenMausBot session daily
+
+[Timer]
+OnCalendar=daily
+RandomizedDelaySec=1h
+Persistent=true
+
+[Install]
+WantedBy=timers.target
+EOF
+fi
+
 if (( PRINT )); then
   echo "# omb-webreports install --print: ROOT=$ROOT OWNER=$OWNER LISTEN=$LISTEN_IP:$LISTEN_PORT SITE=$SITE_URL"
   (cd "$STAGE" && find . -type f | sort | while read -r f; do echo; echo "======== ${f#.}"; cat "$f"; done)
@@ -262,6 +309,7 @@ a2dissite -q reports 2>/dev/null || true
 rm -f /etc/apache2/sites-available/reports.conf
 
 # --- install the generated files ---------------------------------------------
+dropin_before=$(cat "$LOOPBACK_DROPIN" 2>/dev/null || true)
 (cd "$STAGE" && find . -type f) | while read -r f; do
   install -D -m 0644 "$STAGE/${f#./}" "/${f#./}"
 done
@@ -284,6 +332,49 @@ apache2ctl configtest
 systemctl daemon-reload
 systemctl enable -q apache2 webdata-sync.service webdata-jobs.service
 systemctl restart apache2 webdata-sync.service webdata-jobs.service
+
+# --- OpenMausBot isolation ------------------------------------------------------
+omb_up() { for _ in $(seq 1 30); do curl -s -o /dev/null --max-time 2 "$OMB_URL/api/health" && return 0; sleep 1; done; return 1; }
+if systemctl cat openmausbot.service >/dev/null 2>&1; then
+  [[ -n $OMB_LOOPBACK_TRUST ]] || rm -f "$LOOPBACK_DROPIN"
+  dropin_after=$(cat "$LOOPBACK_DROPIN" 2>/dev/null || true)
+  echo
+  echo "OpenMausBot local requests: ${OMB_LOOPBACK_TRUST:-the OpenMausBot default}"
+  if [[ $OMB_LOOPBACK_TRUST == service ]]; then
+    # webdata-skills' own session first: while OpenMausBot still trusts local
+    # requests (before the restart below), it mints the pairing code itself.
+    omb_up && "$NODE" "$ROOT/bin/webdata-skills" login 2>&1 | sed 's/^/  /' \
+      || warn "webdata-skills has no OpenMausBot session: create a full-access pairing code in the app (Settings → Remote access), then: sudo webdata-skills login --code <code>"
+  fi
+  if [[ $dropin_before != "$dropin_after" ]]; then
+    systemctl daemon-reload
+    echo "  restarting openmausbot for the change"
+    systemctl restart openmausbot.service
+    omb_up || warn "openmausbot didn't come back at $OMB_URL; check: journalctl -u openmausbot -n 50"
+  fi
+  if [[ $OMB_LOOPBACK_TRUST == service ]]; then
+    systemctl enable -q --now webdata-omb-session.timer
+    code=$(curl -s -o /dev/null -w '%{http_code}' "$OMB_URL/api/bot-presets" || true)
+    if [[ $code == 401 || $code == 403 ]]; then echo "  isolated: a local request without a login is refused ($code)"
+    else warn "isolation check: OpenMausBot answered $code to a local request without a login (expected 403)"; fi
+  else
+    systemctl disable -q --now webdata-omb-session.timer 2>/dev/null || true
+    rm -f /etc/systemd/system/webdata-omb-session.service /etc/systemd/system/webdata-omb-session.timer
+    systemctl daemon-reload
+  fi
+fi
+
+# --- bots' skills ---------------------------------------------------------------
+# Bots keep their own copy of each skill: after a git pull, bring the copies
+# (and the Report builder preset) up to date through OpenMausBot's API. As
+# root, so it can use the root-only session when OpenMausBot is isolated; a
+# failure here doesn't fail the install.
+if systemctl is-active --quiet openmausbot.service; then
+  echo
+  echo "bots' skills (webdata-skills sync):"
+  "$NODE" "$ROOT/bin/webdata-skills" sync 2>&1 | sed 's/^/  /' \
+    || warn "couldn't update the bots' skills; run: sudo webdata-skills sync"
+fi
 
 echo
 echo "omb-webreports is installed."

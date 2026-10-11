@@ -41,3 +41,5 @@ export const NODE_MODULES_DIR = pick('NODE_MODULES_DIR', '/usr/lib/node_modules'
  *  OpenMausBot release this repo is tested with (node-api 1.5.6-r.1 = DuckDB v1.5.6). */
 export const DUCKDB_WASM_VERSION = pick('DUCKDB_WASM_VERSION', '1.33.1-dev65.0');
 export const ACCESS_LOG = '/var/log/apache2/webdata-access.log';
+/** OpenMausBot's API on this machine (webdata-skills uses it to update bots' skills). */
+export const OMB_URL = pick('OMB_URL', 'http://127.0.0.1:8799').replace(/\/$/, '');

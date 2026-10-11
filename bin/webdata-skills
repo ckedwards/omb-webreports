@@ -1,0 +1,283 @@
+#!/usr/bin/env node
+// webdata-skills: keep OpenMausBot's copies of the omb-webreports skills in
+// step with this checkout.
+//
+//   webdata-skills status            which bots have the skills, and whether they're current
+//   webdata-skills add <bot>...      give bots the skills (instead of /learn), switched on
+//   webdata-skills sync [--dry-run]  update outdated copies in every bot that has them,
+//                                    and make the "Report builder" preset current
+//   webdata-skills package [--check] regenerate skills/omb-webreports.openmaus.json
+//                                    (--check: exit 1 if it's out of date)
+//   webdata-skills login [--code C]  (sudo) a session of its own, for an isolated OpenMausBot
+//   webdata-skills logout            (sudo) revoke it
+//   webdata-skills keepalive         (sudo; the daily webdata-omb-session timer) keep it valid
+//
+// Isolation: with OMB_LOOPBACK_TRUST=service (config.env, applied by
+// admin/install.sh) OpenMausBot ignores requests from this machine that have
+// no login, so bots' shells can't administer it. webdata-skills then uses its
+// own session, kept in /etc/omb-webreports/omb-session.json (root only), so
+// status/add/sync run with sudo. Without isolation no session is needed.
+//
+// Bots keep their own copy of each skill, so a changed skills/*/SKILL.md
+// (after git pull) doesn't reach them by itself. sync replaces outdated
+// copies through OpenMausBot's API and keeps each skill switched on or off as
+// it was; only bots that already have a webdata skill are touched. It runs
+// automatically at the end of admin/install.sh and admin/openmausbot-upgrade.sh.
+//
+// The package is OpenMausBot's template format: the skills plus a preset bot
+// for New bot. Import it once (OpenMausBot: Import → the file, or its GitHub
+// link); sync then replaces it with each new release.
+
+import { repoSkills, skillSource, buildPackage, readPackageFile, checkSkills, sha256, omb, ombReady, OmbError, PACKAGE_FILE, PACKAGE_ID,
+  readSession, saveSession, SESSION_FILE, SESSION_LABEL } from './_skills.mjs';
+import fs from 'node:fs';
+import path from 'node:path';
+import readline from 'node:readline/promises';
+
+const args = process.argv.slice(2);
+const cmd = args[0];
+const flags = new Set(args.filter((a) => a.startsWith('--')));
+const rest = args.slice(1).filter((a) => !a.startsWith('--'));
+const dry = flags.has('--dry-run');
+const valueOf = (flag) => { const i = args.indexOf(flag); return i >= 0 ? args[i + 1] : undefined; };
+const isRoot = () => process.getuid?.() === 0;
+const requireRoot = () => {
+  if (!isRoot() && !process.env.WEBDATA_OMB_SESSION) throw new OmbError(`${cmd} manages a root-only session: run it with sudo`);
+};
+const days = (ms) => Math.round(ms / 86_400_000);
+const ROTATE_AFTER_MS = 30 * 86_400_000;   // OpenMausBot caps a session's life at 180 days
+const log = (...a) => console.log(...a);
+
+function usage(code = 2) {
+  const src = fs.readFileSync(new URL(import.meta.url), 'utf8').split('\n').slice(1, 32);
+  (code ? console.error : console.log)(src.map((l) => l.replace(/^\/\/ ?/, '')).join('\n'));
+  process.exit(code);
+}
+
+const samePackageContent = (a, b) => {
+  const strip = (d) => d && JSON.stringify({ ...d, package: { ...d.package, release: '', notes: '' } });
+  return strip(a) === strip(b);
+};
+
+// ---------------------------------------------------------------- OpenMausBot state
+
+async function bots() {
+  return (await omb('GET', '/api/bots')).bots.map((b) => ({ id: b.id, name: b.name }));
+}
+async function botSkills(id) {
+  return (await omb('GET', `/api/bots/${id}/skills`)).skills ?? [];
+}
+const ours = (skills) => new Set(skills.map((s) => s.name));
+
+/** Replace a bot's copy of a skill, keeping it on or off; puts the old copy back on failure. */
+async function replaceSkill(bot, installed, skill) {
+  const old = (await omb('GET', `/api/bots/${bot.id}/skills/${skill.name}`)).text;
+  await omb('DELETE', `/api/bots/${bot.id}/skills/${skill.name}`);
+  try {
+    await installSkill(bot, skill, installed.enabled);
+  } catch (e) {
+    await omb('POST', `/api/bots/${bot.id}/skill-template`, {
+      name: skill.name, description: installed.description, warnings: [], source: installed.source, text: old, enabled: installed.enabled,
+    }).catch(() => {});
+    throw e;
+  }
+}
+const installSkill = (bot, skill, enabled) => omb('POST', `/api/bots/${bot.id}/skill-template`, {
+  name: skill.name, description: skill.description, warnings: [], source: skillSource(skill.name), text: skill.text, enabled,
+});
+
+// ---------------------------------------------------------------- commands
+
+function accessLine() {
+  let session;
+  try { session = readSession(); } catch { return `access    isolated: session in ${SESSION_FILE} (root only; run with sudo)`; }
+  return session ? `access    session "${session.label}", created ${days(Date.now() - session.createdAt)} days ago`
+    : 'access    no session: relies on OpenMausBot trusting local requests (its default; see OMB_LOOPBACK_TRUST)';
+}
+
+async function status() {
+  log(accessLine());
+  const skills = repoSkills();
+  const want = new Map(skills.map((s) => [s.name, s]));
+  const committed = readPackageFile();
+  const built = buildPackage(skills, committed);
+  log(`package   ${path.relative(process.cwd(), PACKAGE_FILE) || PACKAGE_FILE}: ${!committed ? 'MISSING (webdata-skills package)' : samePackageContent(committed, built) ? `current (release ${committed.package.release})` : 'OUT OF DATE (webdata-skills package)'}`);
+  await ombReady(5_000);
+  let anyOutdated = false;
+  for (const bot of await bots()) {
+    const have = (await botSkills(bot.id)).filter((s) => want.has(s.name));
+    if (!have.length) { log(`bot       ${bot.name}: no webdata skills (add with: webdata-skills add "${bot.name}")`); continue; }
+    const parts = have.map((s) => {
+      const current = s.sha256 === want.get(s.name).sha256;
+      if (!current) anyOutdated = true;
+      return `${s.name} ${current ? 'current' : 'OUTDATED'}${s.enabled ? '' : ' (off)'}`;
+    });
+    const missing = skills.filter((s) => !have.some((h) => h.name === s.name)).map((s) => s.name);
+    log(`bot       ${bot.name}: ${parts.join(', ')}${missing.length ? `; missing ${missing.join(', ')}` : ''}`);
+  }
+  const presets = (await omb('GET', '/api/bot-presets')).presets.filter((p) => p.packageName === PACKAGE_ID);
+  log(`preset    ${presets.length ? presets.map((p) => `${p.name} ${p.release}${p.release === built.package.release ? ' (current)' : ' (old)'}`).join(', ') : 'not imported (webdata-skills sync imports it)'}`);
+  if (anyOutdated) log('\nOutdated copies: webdata-skills sync');
+}
+
+async function packageCmd() {
+  if (isRoot() && !flags.has('--check')) throw new OmbError('run package as the checkout\'s owner, not root (it writes into skills/)');
+  const committed = readPackageFile();
+  const doc = buildPackage(repoSkills(), committed);
+  const findings = await checkSkills();
+  const current = committed && samePackageContent(committed, doc);
+  if (flags.has('--check')) {
+    log(current ? `current (release ${committed.package.release})` : `${path.basename(PACKAGE_FILE)} is out of date: run webdata-skills package`);
+    process.exit(current ? 0 : 1);
+  }
+  if (findings.length) log(`scan findings (OpenMausBot shows these on import):\n  ${findings.join('\n  ')}`);
+  if (current) { log(`${path.basename(PACKAGE_FILE)} already current (release ${committed.package.release})`); return; }
+  fs.writeFileSync(PACKAGE_FILE, JSON.stringify(doc, null, 2) + '\n');
+  log(`wrote ${path.basename(PACKAGE_FILE)} (release ${doc.package.release}, ${doc.package.skills.entries.length} skills, preset "${doc.package.presets[0].name}")`);
+}
+
+async function add(names) {
+  if (!names.length) usage();
+  const skills = repoSkills();
+  await checkSkills(skills);
+  await ombReady(5_000);
+  const all = await bots();
+  let failed = 0;
+  for (const name of names) {
+    const bot = all.find((b) => b.id === name || b.name.toLowerCase() === name.toLowerCase());
+    if (!bot) { console.error(`no bot named "${name}" (bots: ${all.map((b) => b.name).join(', ')})`); failed++; continue; }
+    const have = ours(await botSkills(bot.id));
+    for (const skill of skills) {
+      if (have.has(skill.name)) { log(`${bot.name}: ${skill.name} already there (webdata-skills sync updates it)`); continue; }
+      if (dry) { log(`${bot.name}: would add ${skill.name}`); continue; }
+      try { await installSkill(bot, skill, !flags.has('--disabled')); log(`${bot.name}: added ${skill.name}${flags.has('--disabled') ? ' (off)' : ''}`); }
+      catch (e) { console.error(`${bot.name}: ${skill.name}: ${e.message}`); failed++; }
+    }
+  }
+  if (!dry && !failed) log('\nIn the app, the bot also needs permission to run the webdata-* commands and to write the omb-webreports folder.');
+  process.exit(failed ? 1 : 0);
+}
+
+async function sync() {
+  const skills = repoSkills();
+  await checkSkills(skills);
+  const want = new Map(skills.map((s) => [s.name, s]));
+  const committed = readPackageFile();
+  const doc = buildPackage(skills, committed);
+  if (!committed || !samePackageContent(committed, doc)) {
+    log(`note: ${path.basename(PACKAGE_FILE)} doesn't match skills/ (run webdata-skills package); syncing from skills/ (release ${doc.package.release})`);
+  }
+  await ombReady();
+  let updated = 0, current = 0, failed = 0;
+
+  // 1. Bots that have the skills: replace outdated copies.
+  for (const bot of await bots()) {
+    for (const installed of (await botSkills(bot.id)).filter((s) => want.has(s.name))) {
+      const skill = want.get(installed.name);
+      if (installed.sha256 === skill.sha256) { current++; continue; }
+      if (dry) { log(`${bot.name}: would update ${skill.name}${installed.enabled ? '' : ' (stays off)'}`); updated++; continue; }
+      try { await replaceSkill(bot, installed, skill); updated++; log(`${bot.name}: updated ${skill.name}${installed.enabled ? '' : ' (stays off)'}`); }
+      catch (e) { failed++; console.error(`${bot.name}: ${skill.name}: ${e.message}`); }
+    }
+  }
+
+  // 2. The preset: import this release if it isn't there, then drop older ones.
+  const presets = (await omb('GET', '/api/bot-presets')).presets.filter((p) => p.packageName === PACKAGE_ID);
+  const old = presets.filter((p) => p.release !== doc.package.release);
+  if (!presets.some((p) => p.release === doc.package.release)) {
+    if (dry) log(`would import preset release ${doc.package.release}`);
+    else {
+      try { await omb('POST', '/api/teams/import', doc); log(`preset "Report builder": imported release ${doc.package.release}`); }
+      catch (e) { failed++; console.error(`preset: ${e.message}`); }
+    }
+  }
+  for (const p of old) {
+    if (dry) { log(`would remove preset "${p.name}" release ${p.release}`); continue; }
+    try { await omb('DELETE', `/api/bot-presets/${p.id}`); log(`preset "${p.name}": removed old release ${p.release}`); }
+    catch (e) { failed++; console.error(`preset ${p.release}: ${e.message}`); }
+  }
+
+  log(`skills: ${updated} ${dry ? 'to update' : 'updated'}, ${current} current${failed ? `, ${failed} failed` : ''}`);
+  process.exit(failed ? 1 : 0);
+}
+
+// ---------------------------------------------------------------- session (isolated OpenMausBot)
+
+/** Redeem a pairing code into a full-access session and save it (root only). */
+async function redeem(code, previous) {
+  const r = await omb('POST', '/api/auth/pair', { code: code.trim(), label: SESSION_LABEL }, { auth: false });
+  if (!r.session.scopes.includes('admin')) {
+    await omb('DELETE', `/api/auth/sessions/${r.session.id}`, null, { token: r.token }).catch(() => {});
+    throw new OmbError('that code is chat-only; create a full-access code');
+  }
+  saveSession({ token: r.token, id: r.session.id, label: SESSION_LABEL, createdAt: Date.now() });
+  if (previous?.id && previous.id !== r.session.id) {
+    await omb('DELETE', `/api/auth/sessions/${previous.id}`, null, { token: r.token }).catch(() => {});
+  }
+  return r.session;
+}
+
+async function login() {
+  requireRoot();
+  const existing = readSession();
+  await ombReady();
+  if (existing && !flags.has('--force')) {
+    try {
+      const s = await omb('GET', '/api/auth/session');
+      log(`already signed in as "${s.label}" (session expires in ${days(s.expiresAt - Date.now())} days; renewed daily by webdata-omb-session.timer)`);
+      return;
+    } catch (e) { if (!e.status) throw e; log('the saved session no longer works; signing in again'); }
+  }
+  let code = valueOf('--code');
+  if (!code) {
+    // While OpenMausBot still trusts local requests (its default), mint the code here.
+    try { code = (await omb('POST', '/api/auth/pairing', { label: SESSION_LABEL }, { auth: false })).code; }
+    catch (e) { if (!e.status) throw e; }
+  }
+  if (!code) {
+    const how = 'in the OpenMausBot app, Settings → Remote access, create a full-access pairing code';
+    if (!process.stdin.isTTY) throw new OmbError(`OpenMausBot is isolated, so it needs a pairing code: ${how}, then run: sudo webdata-skills login --code <code>`);
+    const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
+    code = await rl.question(`OpenMausBot is isolated, so ${how} and enter it here: `);
+    rl.close();
+  }
+  const s = await redeem(code, existing);
+  log(`signed in: OpenMausBot session "${s.label}" saved to ${SESSION_FILE} (root only)`);
+}
+
+async function logout() {
+  requireRoot();
+  const s = readSession();
+  if (!s) { log('not signed in'); return; }
+  await omb('DELETE', `/api/auth/sessions/${s.id}`).then(() => log(`revoked session "${s.label}"`), (e) => log(`couldn't revoke it in OpenMausBot (${e.message}); removing the file anyway`));
+  fs.rmSync(SESSION_FILE, { force: true });
+}
+
+/** Daily: using the session renews it (30 days without use expires it);
+ *  monthly, swap it for a new one (OpenMausBot ends every session at 180 days). */
+async function keepalive() {
+  requireRoot();
+  const s = readSession();
+  if (!s) return;
+  await ombReady(60_000);
+  const current = await omb('GET', '/api/auth/session');
+  if (Date.now() - s.createdAt < ROTATE_AFTER_MS) {
+    log(`session ok (expires in ${days(current.expiresAt - Date.now())} days)`);
+    return;
+  }
+  const { code } = await omb('POST', '/api/auth/pairing', { label: SESSION_LABEL });
+  await redeem(code, s);
+  log('session replaced with a new one (monthly rotation)');
+}
+
+// ---------------------------------------------------------------- main
+
+const commands = { status, add: () => add(rest), sync, package: packageCmd, login, logout, keepalive };
+if (cmd === '-h' || cmd === '--help') usage(0);
+if (!commands[cmd]) usage();
+try {
+  await commands[cmd]();
+} catch (e) {
+  console.error(e instanceof OmbError ? `webdata-skills: ${e.message}` : e.stack || e.message);
+  process.exit(2);
+}

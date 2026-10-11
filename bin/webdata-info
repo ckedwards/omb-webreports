@@ -13,7 +13,8 @@ import path from 'node:path';
 
 import os from 'node:os';
 
-import { ROOT, SITE_URL, OMB_DATA_DIR, NODE_MODULES_DIR, LISTEN_IP, DUCKDB_WASM_VERSION } from './_config.mjs';
+import { ROOT, SITE_URL, OMB_DATA_DIR, NODE_MODULES_DIR, LISTEN_IP, DUCKDB_WASM_VERSION, OMB_URL } from './_config.mjs';
+import { SESSION_FILE } from './_skills.mjs';
 
 const arg = process.argv[2];
 if (arg === '--root') { console.log(ROOT); process.exit(0); }
@@ -33,6 +34,14 @@ function duckdbLine() {
     : browser === server ? `DuckDB ${browser}, same as the server`
     : `DuckDB ${browser}, MISMATCH with the server's ${server}: run admin/openmausbot-upgrade.sh`;
   return `${DUCKDB_WASM_VERSION} (${verdict})`;
+}
+// Does OpenMausBot refuse a local request without a login? (OMB_LOOPBACK_TRUST=service)
+async function isolationLine() {
+  let code;
+  try { code = (await fetch(`${OMB_URL}/api/bot-presets`, { signal: AbortSignal.timeout(3000) })).status; } catch { return 'unknown (OpenMausBot not reachable)'; }
+  const session = fs.existsSync(SESSION_FILE) ? 'webdata-skills session present' : 'NO webdata-skills session: sudo webdata-skills login';
+  if (code === 401 || code === 403) return `on: local requests without a login are refused; ${session}`;
+  return `off: any program on this machine, bots' shells included, can administer OpenMausBot (OMB_LOOPBACK_TRUST in config.env)`;
 }
 const active = (unit) => { try { return execFileSync('systemctl', ['is-active', unit], { encoding: 'utf8' }).trim(); } catch (e) { return (e.stdout || 'unknown').trim(); } };
 
@@ -58,4 +67,7 @@ versions
   node               ${process.versions.node}
 
 services
-${['openmausbot', 'apache2', 'webdata-sync', 'webdata-jobs'].map((u) => `  ${u.padEnd(18)} ${active(u)}`).join('\n')}`);
+${['openmausbot', 'apache2', 'webdata-sync', 'webdata-jobs'].map((u) => `  ${u.padEnd(18)} ${active(u)}`).join('\n')}
+
+OpenMausBot isolation
+  ${await isolationLine()}`);

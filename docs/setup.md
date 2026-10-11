@@ -164,7 +164,9 @@ admin/openmausbot-upgrade.sh
 systemctl show openmausbot -p Environment     # must include OMB_DUCKDB_DIR=/usr/lib
 ```
 
-Pair your phone or browser with OpenMausBot as its docs describe, create a bot,
+Pair your phone or browser with OpenMausBot now, as its docs describe (after
+step 7 isolates OpenMausBot, its CLI can no longer pair devices; you'd do it in
+the app, Settings → Remote access). Create a bot,
 and confirm its data tools work: ask it to create a small table. If you see
 `engine_unavailable`, go back to step 3.
 
@@ -195,6 +197,7 @@ config.example.env config.env`. Edit it; the defaults work for a typical setup:
 | `OMB_DATA_DIR` | `~/.openmausbot` | OpenMausBot runs with another `--data-dir` |
 | `NODE_MODULES_DIR` | `/usr/lib/node_modules` | your global modules live elsewhere |
 | `DUCKDB_WASM_VERSION` | set by `admin/openmausbot-upgrade.sh` | never by hand: it's the browser build matching OpenMausBot's DuckDB |
+| `OMB_LOOPBACK_TRUST` | `service` (isolated) | `owner` to let any local program act as you in OpenMausBot (its own default), or empty to leave it alone |
 
 ## 7. Install
 
@@ -216,6 +219,13 @@ The installer:
   to the folders above it (POSIX ACLs; it can't list or read anything else);
 - installs and starts two services running as you, sandboxed:
   `webdata-sync` (publishes bot databases) and `webdata-jobs` (scheduled jobs);
+- **isolates OpenMausBot** (`OMB_LOOPBACK_TRUST=service`): programs on this
+  machine, your bots' shells included, can no longer administer it without a
+  login. webdata-skills gets a session of its own first, kept where only root
+  can read it, plus a daily timer that keeps it valid (see
+  [architecture](architecture.md#security-model));
+- adds the Report builder preset to OpenMausBot and updates bots' copies of the
+  skills (`webdata-skills sync`, step 9), if OpenMausBot is running;
 - links the `webdata-*` tools into `/usr/local/bin`.
 
 It's idempotent: re-run it after `git pull` or after editing `config.env`.
@@ -237,8 +247,25 @@ reinstall needed.
 
 ## 9. Teach your bots the skills
 
-Bots learn skills through OpenMausBot's own skill store, and only take a
-`SKILL.md` file. In a chat with each bot that should build reports:
+Four skills in `skills/` teach a bot to read, create and update reports and to
+schedule data jobs. Each bot keeps its own copy of a skill in OpenMausBot.
+There are three ways to give a bot the skills.
+
+**A new bot from the preset (recommended).** The install (step 7) added a
+**Report builder** preset to OpenMausBot's New bot dialog: the four skills plus
+standing instructions for report work. In the app: New bot → Report builder →
+Create, then open the bot's skills and **turn each of the four on** (skills
+added from a file always arrive switched off). The preset comes from
+`skills/omb-webreports.openmaus.json`, an OpenMausBot package; you can also
+import that file in the app yourself, or its GitHub link.
+
+**An existing bot:**
+
+```bash
+sudo webdata-skills add Bramble     # the bot's name; adds the four skills, switched on
+```
+
+**Or by chat**, with OpenMausBot's `/learn` (you confirm each skill in the app):
 
 ```
 /learn Create one skill per file with skill_manage, using each file's contents
@@ -248,9 +275,13 @@ exactly as written: ~/omb-webreports/skills/webdata-reports-read/SKILL.md,
 ~/omb-webreports/skills/webdata-data-job/SKILL.md. Use the file path as the source.
 ```
 
-(Adjust the paths to your checkout.) You confirm each skill in the app. When a
-skill file changes after a `git pull`, ask the bot to update its learned skill
-of the same name: the bot keeps its approved copy, not a link.
+However a bot got them, **updates are automatic**: `admin/install.sh` (after a
+`git pull`) and `admin/openmausbot-upgrade.sh` finish with `webdata-skills
+sync`, which replaces outdated copies in every bot that has them (keeping each
+skill on or off as it was) and swaps in the new release of the preset.
+`sudo webdata-skills status` shows which bots have the skills and whether
+they're current (`sudo` because, with OpenMausBot isolated, it uses a root-only
+session).
 
 Bots will ask for approval to read and write the checkout and to run the
 `webdata-*` commands; allow them in the bot's settings if that gets tedious.
@@ -264,7 +295,8 @@ webhook for that bot and register its URL. See
 ## 11. Verify everything
 
 ```bash
-webdata-info                    # versions, paths, all four services "active", browser DuckDB "same as the server"
+webdata-info                    # versions, paths, all four services "active", browser DuckDB "same as the server",
+                                # OpenMausBot isolation "on" with a webdata-skills session
 webdata-check _gallery          # renders the design gallery on a headless iPhone: must print OK
 ```
 

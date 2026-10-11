@@ -44,8 +44,10 @@ THIS SOFTWARE.
 
 ## Loaded at runtime, not bundled
 
-- **DuckDB-WASM 1.32.0** (MIT): loaded by `webroot/lib/kit.js` from
-  cdn.jsdelivr.net in the viewer's browser.
+- **DuckDB-WASM** (MIT): loaded by `webroot/lib/kit.js` from cdn.jsdelivr.net
+  in the viewer's browser. The version is `DUCKDB_WASM_VERSION` (default
+  1.33.1-dev65.0, which contains DuckDB v1.5.6), kept equal to OpenMausBot's
+  DuckDB by `admin/openmausbot-upgrade.sh`.
 
 ## Used from the host, not bundled
 

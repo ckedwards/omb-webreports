@@ -52,8 +52,9 @@ ROOT/
    change and writes a consistent snapshot to `webroot/data/<bot-name>.duckdb`
    (lowercased bot name, e.g. MyBot → `mybot`). It never opens the bot's live
    file: it copies it (+WAL) aside first, then writes a fresh database with
-   `STORAGE_VERSION 'v1.2.0', BLOCK_SIZE 16384`. The storage version is one the
-   browser's DuckDB-WASM (engine 1.4.x) reads although the bot runs a newer DuckDB;
+   `STORAGE_VERSION 'v1.2.0', BLOCK_SIZE 16384`. The browser runs the same DuckDB
+   engine as the bots (DuckDB-WASM pinned to match by `DUCKDB_WASM_VERSION`; see
+   `webdata-info`), so SQL that works in `webdata-sql` works in reports;
    16 KB blocks stop every tiny table padding out to 256 KB (MyBot: 3.4 MB → 240 KB).
    Apache then serves it brotli/gzip-compressed (MyBot: ~8 KB on the wire).
 3. It also writes `webroot/data/catalog.json`: every database, its tables,

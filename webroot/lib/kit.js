@@ -20,7 +20,18 @@
 // first-render results so a first visit doesn't wait for it either. See
 // "result cache" and "baked first render" below.
 
-const DUCKDB_WASM = 'https://cdn.jsdelivr.net/npm/@duckdb/duckdb-wasm@1.32.0/+esm';
+// The DuckDB-WASM build comes from the page's import map, which webdata-sync
+// writes from DUCKDB_WASM_VERSION: the build with the same DuckDB engine as
+// OpenMausBot (admin/openmausbot-upgrade.sh keeps them equal). The fallback only
+// serves a page without the webdata:modules block; keep it equal to the default
+// in bin/_config.mjs.
+const DUCKDB_WASM_FALLBACK = 'https://cdn.jsdelivr.net/npm/@duckdb/duckdb-wasm@1.33.1-dev65.0/+esm';
+function duckdbWasmUrl() {
+  try {
+    const map = JSON.parse(document.querySelector('script[type="importmap"]')?.textContent || '{}');
+    return map.imports?.['@duckdb/duckdb-wasm'] || DUCKDB_WASM_FALLBACK;
+  } catch { return DUCKDB_WASM_FALLBACK; }
+}
 const POLL_MS = 15000;
 
 // Load-time marks, readable in devtools: performance.getEntriesByType('mark')
@@ -35,7 +46,7 @@ let enginePromise = null;
 function engine() {
   enginePromise ??= (async () => {
     mark('engine-start');
-    const duckdb = await import(DUCKDB_WASM);
+    const duckdb = await import(duckdbWasmUrl());
     mark('engine-imported');
     const bundle = await duckdb.selectBundle(duckdb.getJsDelivrBundles());
     const workerUrl = URL.createObjectURL(

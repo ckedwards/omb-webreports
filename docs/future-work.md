@@ -43,10 +43,11 @@ that query live. The worst case is a missed shortcut.
 
 Two safeguards it would need:
 
-- **Same results as the browser.** Native DuckDB (1.5.x) is newer than the
-  browser's DuckDB-WASM (1.4.x), and kit converts values (DECIMAL, BIGINT,
-  dates, lists, structs) in its own way. On every Chrome bake, sync would also
-  run the SQL natively, convert it the same way, and compare. A report whose
+- **Same results as the browser.** The browser and the server run the same
+  DuckDB engine version (see [architecture](architecture.md#design-decisions)),
+  but a pin can lag after `--skip-browser-check`, and kit converts values
+  (DECIMAL, BIGINT, dates, lists, structs) in its own way. On every Chrome bake,
+  sync would also run the SQL natively, convert it the same way, and compare. A report whose
   results differ stays on Chrome-only bakes, so each report checks itself.
 - **No file access from SQL.** In the browser, report SQL can't reach the
   server's files; natively it could (`read_csv('/home/…')`, `COPY … TO`).

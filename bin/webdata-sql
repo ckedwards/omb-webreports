@@ -7,8 +7,8 @@
 //
 // Every webroot/data/<name>.duckdb is attached read-only as <name>, so the
 // SQL is the same SQL a report runs in the browser (<name>.main.<table>).
-// The engine here is newer than the browser's DuckDB-WASM (1.4.x); stick to
-// mainstream SQL and confirm in the browser with webdata-check.
+// The engine here is OpenMausBot's DuckDB; the browser runs the same version
+// (DUCKDB_WASM_VERSION, see webdata-info). Confirm in the browser with webdata-check.
 
 import fs from 'node:fs';
 import path from 'node:path';

@@ -25,7 +25,7 @@ import { createRequire } from 'node:module';
 import path from 'node:path';
 import { pathToFileURL } from 'node:url';
 
-import { ROOT, OMB_DATA_DIR, NODE_MODULES_DIR } from './_config.mjs';
+import { ROOT, OMB_DATA_DIR, NODE_MODULES_DIR, DUCKDB_WASM_VERSION } from './_config.mjs';
 import { BAKE_FILE, bakeConfig, dueTargets } from './_bake.mjs';
 const WEB = path.join(ROOT, 'webroot');
 const DATA = path.join(WEB, 'data');
@@ -36,11 +36,11 @@ const LOCK = path.join(STATE_DIR, 'lock');
 const OMB = OMB_DATA_DIR;
 const NODE_MODULES = NODE_MODULES_DIR;
 
-// Snapshot format. DuckDB-WASM in reports (kit.js) bundles an older engine
-// (1.4.x) than the bot, so the storage version is pinned to one it reads.
-// 16 KB blocks instead of the default 256 KB: bot tables are tiny, and each
-// table otherwise pads to whole 256 KB blocks (3.4 MB -> 240 KB for MyBot;
-// ~8 KB on the wire with Apache's brotli). BLOCK_SIZE needs storage >= v1.2.0.
+// Snapshot format. 16 KB blocks instead of the default 256 KB: bot tables are
+// tiny, and each table otherwise pads to whole 256 KB blocks (3.4 MB -> 240 KB
+// for MyBot; ~8 KB on the wire with Apache's brotli). BLOCK_SIZE needs storage
+// >= v1.2.0, which every DuckDB since 1.2 reads, so the browser can read it even
+// if its DuckDB-WASM ever lags the bots' (see DUCKDB_WASM_VERSION in _config.mjs).
 const SNAPSHOT_FORMAT = "STORAGE_VERSION 'v1.2.0', BLOCK_SIZE 16384";
 const GENERATED = new Set(['manifest.webmanifest', 'icon-180.png', 'icon-512.png', BAKE_FILE]);
 
@@ -371,10 +371,16 @@ function moduleImports() {
   return imports;
 }
 
+// The DuckDB-WASM build is also mapped here, so pages follow DUCKDB_WASM_VERSION
+// (kept equal to OpenMausBot's DuckDB) without kit.js changing; kit reads it
+// from the import map.
+const DUCKDB_WASM_URL = `https://cdn.jsdelivr.net/npm/@duckdb/duckdb-wasm@${DUCKDB_WASM_VERSION}/+esm`;
+
 function modulesBlock(imports, baked) {
+  const map = { ...imports, '@duckdb/duckdb-wasm': DUCKDB_WASM_URL };
   return [
     '<!-- webdata:modules: written by webdata-sync (versioned module URLs); do not edit -->',
-    `<script type="importmap">${JSON.stringify({ imports })}</script>`,
+    `<script type="importmap">${JSON.stringify({ imports: map })}</script>`,
     ...Object.values(imports).map((u) => `<link rel="modulepreload" href="${u}">`),
     ...(baked ? [`<link rel="preload" href="${BAKE_FILE}" as="fetch" crossorigin data-kit-initial>`] : []),
     '<!-- /webdata:modules -->',

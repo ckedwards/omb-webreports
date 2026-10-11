@@ -11,13 +11,29 @@ import { execFileSync } from 'node:child_process';
 import fs from 'node:fs';
 import path from 'node:path';
 
-import { ROOT, SITE_URL, OMB_DATA_DIR, NODE_MODULES_DIR, LISTEN_IP } from './_config.mjs';
+import os from 'node:os';
+
+import { ROOT, SITE_URL, OMB_DATA_DIR, NODE_MODULES_DIR, LISTEN_IP, DUCKDB_WASM_VERSION } from './_config.mjs';
 
 const arg = process.argv[2];
 if (arg === '--root') { console.log(ROOT); process.exit(0); }
 if (arg === '--site') { console.log(SITE_URL); process.exit(0); }
 
 const version = (mod) => { try { return JSON.parse(fs.readFileSync(path.join(NODE_MODULES_DIR, mod, 'package.json'), 'utf8')).version; } catch { return 'MISSING'; } };
+// Browser vs server DuckDB, from admin/duckdb-wasm.mjs's lookup cache (no network here).
+function duckdbLine() {
+  const api = version('@duckdb/node-api');
+  const server = api === 'MISSING' ? null : `v${api.split('-')[0]}`;
+  let browser = null;
+  try {
+    const cacheDir = process.env.XDG_CACHE_HOME || path.join(os.homedir(), '.cache');
+    browser = JSON.parse(fs.readFileSync(path.join(cacheDir, 'omb-webreports', 'duckdb-versions.json'), 'utf8')).wasm?.[DUCKDB_WASM_VERSION] ?? null;
+  } catch {}
+  const verdict = !browser ? 'not checked yet: admin/openmausbot-upgrade.sh --check'
+    : browser === server ? `DuckDB ${browser}, same as the server`
+    : `DuckDB ${browser}, MISMATCH with the server's ${server}: run admin/openmausbot-upgrade.sh`;
+  return `${DUCKDB_WASM_VERSION} (${verdict})`;
+}
 const active = (unit) => { try { return execFileSync('systemctl', ['is-active', unit], { encoding: 'utf8' }).trim(); } catch (e) { return (e.stdout || 'unknown').trim(); } };
 
 console.log(`omb-webreports
@@ -37,6 +53,7 @@ console.log(`omb-webreports
 versions
   openmausbot        ${version('openmausbot')}
   @duckdb/node-api   ${version('@duckdb/node-api')}
+  browser DuckDB     ${duckdbLine()}
   @resvg/resvg-js    ${version('@resvg/resvg-js')}
   node               ${process.versions.node}
 

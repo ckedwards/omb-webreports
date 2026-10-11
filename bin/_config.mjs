@@ -35,4 +35,9 @@ export const SITE_URL = pick('SITE_URL', `http://${LISTEN_IP}:${port}`).replace(
 export const LOCAL_URL = `http://${LISTEN_IP.includes(':') ? `[${LISTEN_IP}]` : LISTEN_IP}:${port}`;
 export const OMB_DATA_DIR = pick('OMB_DATA_DIR', path.join(os.homedir(), '.openmausbot'));
 export const NODE_MODULES_DIR = pick('NODE_MODULES_DIR', '/usr/lib/node_modules');
+/** The DuckDB-WASM build reports load in the browser. It must contain the same
+ *  DuckDB engine as OpenMausBot's @duckdb/node-api; admin/openmausbot-upgrade.sh
+ *  finds that build and sets it in config.env. The default matches the
+ *  OpenMausBot release this repo is tested with (node-api 1.5.6-r.1 = DuckDB v1.5.6). */
+export const DUCKDB_WASM_VERSION = pick('DUCKDB_WASM_VERSION', '1.33.1-dev65.0');
 export const ACCESS_LOG = '/var/log/apache2/webdata-access.log';

@@ -65,7 +65,8 @@ More in [docs/architecture.md](docs/architecture.md).
 |---|---|---|
 | Linux with systemd | Ubuntu 26.04 LTS | Debian-family (uses `apt`, Apache layout of Debian/Ubuntu). |
 | [OpenMausBot](https://www.npmjs.com/package/openmausbot) | 0.1.104 | Running as a systemd service, as the same user that owns this checkout. |
-| OpenMausBot's native modules | `@duckdb/node-api` 1.5.6-r.1, `@resvg/resvg-js` 2.6.2 | **Not shipped by the npm package.** Installed by [scripts/openmausbot-upgrade.sh](scripts/openmausbot-upgrade.sh); see [setup step 3](docs/setup.md#3-openmausbot-and-its-native-modules). |
+| OpenMausBot's native modules | `@duckdb/node-api` 1.5.6-r.1, `@resvg/resvg-js` 2.6.2 | **Not shipped by the npm package.** Installed by [admin/openmausbot-upgrade.sh](admin/openmausbot-upgrade.sh); see [setup step 3](docs/setup.md#3-openmausbot-and-its-native-modules). |
+| DuckDB-WASM (in the browser) | 1.33.1-dev65.0 = DuckDB v1.5.6 | Loaded from jsDelivr. **Kept on the same DuckDB version as OpenMausBot's** by the upgrade script, which won't move to a release without a matching build unless you say so. |
 | Node.js | 24 (20+ required) | NodeSource packages. |
 | Apache httpd | 2.4.66 | Installed by `admin/install.sh`; **dedicated to this site** (it rewrites `ports.conf`). |
 | Tailscale | 1.104 | Private access + HTTPS via `tailscale serve`. |
@@ -77,11 +78,13 @@ More in [docs/architecture.md](docs/architecture.md).
 Full guide with explanations: **[docs/setup.md](docs/setup.md)**.
 
 ```bash
-# 1–5: Tailscale, Node.js, OpenMausBot + native modules, OMB service, Chrome (docs/setup.md)
-
+# 1–2: base packages, Tailscale; 3: Node.js, then (docs/setup.md):
 git clone https://github.com/ckedwards/omb-webreports.git ~/omb-webreports
 cd ~/omb-webreports
-cp config.example.env config.env     # set LISTEN_IP / SITE_URL if the defaults don't fit
+admin/openmausbot-upgrade.sh         # OpenMausBot + native modules + matching browser DuckDB
+# 4–5: OpenMausBot service, Chrome (docs/setup.md)
+
+$EDITOR config.env                   # set LISTEN_IP / SITE_URL if the defaults don't fit
 sudo bash admin/install.sh           # Apache + services + tools on PATH
 tailscale serve --bg --https=8443 http://$(tailscale ip -4):8080   # HTTPS for phones
 webdata-info                         # paths, URL, versions, service status
@@ -130,12 +133,13 @@ From a shell:
 
 ```
 admin/install.sh         system side (Apache, systemd units, tools on PATH); run with sudo
+admin/openmausbot-upgrade.sh  install/upgrade OpenMausBot + its native modules; keeps the
+                         browser's DuckDB (DuckDB-WASM) on the same version as OpenMausBot's
 bin/                     the webdata-* tools
 config.example.env       settings template → config.env (git-ignored)
 docs/                    user documentation
 examples/reports/        a complete real report to study
 jobs/                    your scheduled data jobs (git-ignored)
-scripts/                 openmausbot-upgrade.sh: install/upgrade OMB + its native modules
 skills/                  Agent Skills for bots
 templates/report/        the starter report webdata-new-report copies
 webroot/                 the served site: front page, lib/ (kit), reports/ (yours are git-ignored)

@@ -79,9 +79,27 @@ same database format the bots use, so reports run the same SQL the bot does.
 
 **Snapshots, not the live file.** OpenMausBot keeps a bot's database open
 for 10 minutes after use, and DuckDB allows one writer, so the live file can't be
-read safely or served. The snapshot is also where format compatibility is
-handled: the bots' DuckDB (1.5.x) is newer than DuckDB-WASM's engine (1.4.x),
-so snapshots are written with a pinned storage version the browser can read.
+read safely or served.
+
+**The same DuckDB in the browser as on the server.** Reports run DuckDB-WASM;
+the bots, sync, jobs and `webdata-sql` run OpenMausBot's `@duckdb/node-api`.
+They're kept on the **same engine version**, so a query tested on the server
+behaves the same in the browser and the browser reads exactly what the bots
+write. DuckDB-WASM is a separate project with its own versions (1.33.1-dev65.0
+contains DuckDB v1.5.6) and often lags a DuckDB release, so:
+- `DUCKDB_WASM_VERSION` (`config.env`) names the browser build; `webdata-sync`
+  writes it into every page's import map, where kit reads it. Changing it
+  re-stamps the pages and open ones reload.
+- `admin/openmausbot-upgrade.sh` refuses (or asks) before installing an
+  OpenMausBot release whose DuckDB has no DuckDB-WASM build yet, and names the
+  newest release that has one. It sets `DUCKDB_WASM_VERSION` after upgrading.
+- To tell which engine a DuckDB-WASM build contains (its package metadata
+  doesn't say), `admin/duckdb-wasm.mjs` downloads the build's `.wasm` and calls
+  DuckDB's own `duckdb_library_version()` in Node with stand-in imports; results
+  are cached, since published builds never change.
+- Snapshots still pin storage format v1.2.0 (needed for 16 KB blocks), which
+  every DuckDB since 1.2 reads, so a browser that lags (after
+  `--skip-browser-check`) can still open them.
 
 **16 KB blocks + Brotli.** With DuckDB's default 256 KB blocks every small
 table pads to whole blocks: a database with a dozen tiny tables was 3.4 MB.

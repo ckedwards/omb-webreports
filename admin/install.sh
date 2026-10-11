@@ -54,6 +54,19 @@ node_major=$("$NODE" -p 'process.versions.node.split(".")[0]')
 [[ $(stat -c %U "$ROOT") == "$OWNER" ]] || die "$ROOT must be owned by $OWNER"
 systemctl cat openmausbot.service >/dev/null 2>&1 || warn "no openmausbot.service: the site works, but bots won't produce data until OpenMausBot runs"
 ls -d "$HOME_DIR"/.agent-browser/browsers/chrome-*/chrome >/dev/null 2>&1 || warn "no Chrome for agent-browser (openmausbot browser install): webdata-check and webdata-browse won't work"
+# The browser's DuckDB (DUCKDB_WASM_VERSION) should contain the same engine as
+# OpenMausBot's @duckdb/node-api. admin/openmausbot-upgrade.sh keeps them equal;
+# this only warns (as the owner, sharing their lookup cache).
+if (( ! PRINT )); then
+  api=$("$NODE" -p "require('$NODE_MODULES_DIR/@duckdb/node-api/package.json').version")
+  wasm=$(runuser -u "$OWNER" -- "$NODE" --input-type=module -e "console.log((await import('$ROOT/bin/_config.mjs')).DUCKDB_WASM_VERSION)" 2>/dev/null || true)
+  if match=$(timeout 180 runuser -u "$OWNER" -- "$NODE" "$ROOT/admin/duckdb-wasm.mjs" match "$api" 2>/dev/null); then
+    want=$(sed -n 's/^wasm=//p' <<<"$match")
+    [[ $want == "$wasm" ]] || warn "browser DuckDB-WASM $wasm differs from the build matching OpenMausBot's DuckDB ($want for @duckdb/node-api $api): run admin/openmausbot-upgrade.sh (as $OWNER) to align them"
+  else
+    warn "couldn't confirm the browser's DuckDB-WASM $wasm matches OpenMausBot's DuckDB (@duckdb/node-api $api); check with: admin/openmausbot-upgrade.sh --check"
+  fi
+fi
 
 # --- generate every file into a staging dir -----------------------------------
 STAGE=$(mktemp -d)

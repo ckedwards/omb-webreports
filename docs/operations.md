@@ -83,15 +83,19 @@ moving the checkout means Apache lost access to the folders above it: re-run
 
 **`engine_unavailable` / DuckDB did not load** (in OpenMausBot, or the
 tools fail to import `@duckdb/node-api`). The native modules are missing or
-don't match the OpenMausBot release: `bash scripts/openmausbot-upgrade.sh`
+don't match the OpenMausBot release: `admin/openmausbot-upgrade.sh`
 (see [setup step 3](setup.md#3-openmausbot-and-its-native-modules)).
 
-**Reports fail after an OpenMausBot upgrade with a DuckDB error in the
-browser.** Snapshots are written with a pinned storage version that the
-browser's DuckDB-WASM (1.4.x) reads; a much newer `@duckdb/node-api` could
-eventually drop writing that version. Check `webdata-sync` logs for snapshot
-errors, and see `SNAPSHOT_FORMAT` in `bin/webdata-sync` and `DUCKDB_WASM` in
-`webroot/lib/kit.js`.
+**A query works in `webdata-sql` but fails in the browser (or the other way
+round), or reports show a DuckDB error after an upgrade.** The browser's DuckDB
+may not match OpenMausBot's. `webdata-info` shows both ("browser DuckDB");
+`admin/openmausbot-upgrade.sh --check` checks them properly. To realign, re-run
+`admin/openmausbot-upgrade.sh <installed openmausbot version>`: it re-pins
+`DUCKDB_WASM_VERSION` and restarts sync, which re-stamps every page. If no
+matching browser build exists yet (an upgrade made with `--skip-browser-check`),
+either go back to the release the check names, or wait for a DuckDB-WASM build
+and re-run. Snapshots use storage format v1.2.0, which every DuckDB since 1.2
+reads, so a lagging browser can still open them.
 
 **A data job fails.** `webdata-job logs <name>`; see
 [data-jobs.md](data-jobs.md#when-a-job-fails).
@@ -109,12 +113,20 @@ sudo bash admin/install.sh      # applies changes to Apache/services; safe to re
 If the skills changed (`git log -- skills/`), ask your bots to update their
 learned skills from the files.
 
-**OpenMausBot:** always through the script, so its native modules match:
+**OpenMausBot:** always through the script, so its native modules and the
+browser's DuckDB match:
 
 ```bash
-bash scripts/openmausbot-upgrade.sh            # latest
-bash scripts/openmausbot-upgrade.sh 0.1.105    # or a specific version (also rolls back)
+admin/openmausbot-upgrade.sh --check            # versions, match, newest release with a match
+admin/openmausbot-upgrade.sh                    # latest
+admin/openmausbot-upgrade.sh 0.1.107            # or a specific version (also rolls back)
 ```
+
+Before changing anything it looks for the DuckDB-WASM build with the target's
+DuckDB engine. If there's none, it names the newest release that has one and
+asks whether to continue; without a terminal it stops (exit 1). Add
+`--skip-browser-check` to upgrade regardless, accepting that reports run a
+different DuckDB until a matching build appears.
 
 ## Uninstall
 

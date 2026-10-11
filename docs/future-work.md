@@ -91,7 +91,7 @@ DuckDB, would cut a bake to a few hundred milliseconds. It isn't worth it:
   script escaping to run arbitrary code, and happy-dom has disabled script
   execution by default since version 20. A bad report would get everything the
   sync service has: read access to your home folder (OpenMausBot's data and
-  secrets) and write access to the checkout.
+  secrets) and write access to the content folder.
 - **Fidelity.** Native DuckDB plus a copy of kit's value conversion might not
   match the browser exactly, and would need the same checking as above anyway.
 - **Coverage.** Plot, layout sizes and `getComputedStyle` are stubs in a

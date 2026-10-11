@@ -10,7 +10,8 @@ flowchart TB
         botdb[("bots/#lt;id#gt;/data.duckdb")]
         sync["webdata-sync.service<br/>polls every 3 s"]
         bake["webdata-bake<br/>headless Chrome"]
-        webroot[("webroot/<br/>data/ · reports/ · lib/")]
+        content[("/var/lib/omb-webreports<br/>reports/ · data/ (yours)")]
+        program[("/usr/local/lib/omb-webreports<br/>front page · lib/ · gallery (root's)")]
         apache["apache2<br/>read-only, GET/HEAD"]
     end
     ts["tailscale serve<br/>HTTPS, tailnet only"]
@@ -21,11 +22,12 @@ flowchart TB
     jobs -- "scheduled writes" --> botdb
     sync -. "watches for changes" .-> botdb
     botdb -- "on change: copy,<br/>never the live file" --> sync
-    sync -- "snapshot + catalog" --> webroot
-    sync -. "watches reports/, lib/<br/>updates icons, manifests,<br/>shared-file versions" .-> webroot
+    sync -- "snapshot + catalog" --> content
+    sync -. "watches reports/<br/>updates icons, manifests,<br/>shared-file versions" .-> content
     sync -- "report data or page changed" --> bake
-    bake -- "first render's rows:<br/>initial.json" --> webroot
-    webroot --> apache
+    bake -- "first render's rows:<br/>initial.json" --> content
+    content --> apache
+    program --> apache
     apache --> ts
     client -. "checks ETags<br/>every 15 s" .-> ts
     ts -- "pages, kit, bakes, snapshots" --> client
@@ -45,9 +47,9 @@ and listens only on `LISTEN_IP:LISTEN_PORT`.
 | `webdata-sync` | `bin/webdata-sync --watch` | Polls every 3 s. Snapshots changed bot databases, writes the data catalog and report index, renders report icons and manifests, stamps module versions into pages. |
 | `webdata-bake` | `bin/webdata-bake`, started by `webdata-sync` | Bakes each report's first render: runs it in headless Chrome and saves the query results to `initial.json`. |
 | `webdata-jobs` | `bin/webdata-job daemon` | Cron scheduler for `jobs/*`: runs scripts, validates output, writes it into bot databases. |
-| Apache | `/etc/apache2/sites-available/webdata.conf` | Serves `webroot/`: static files only. |
-| kit | `webroot/lib/kit.js`, `kit.css` | Browser runtime every report uses: DuckDB-WASM, live updates, result cache, baked first render, charts, tables, design tokens. |
-| Reports | `webroot/reports/<slug>/` | One directory each: `index.html`, `report.json`, `icon.svg`. One home-screen app each. |
+| Apache | `/etc/apache2/sites-available/webdata.conf` | Serves the shared site files from the program and `reports/`, `data/` from the content folder: static files only. |
+| kit | `/lib/kit.js`, `kit.css` (in the program) | Browser runtime every report uses: DuckDB-WASM, live updates, result cache, baked first render, charts, tables, design tokens. |
+| Reports | `/var/lib/omb-webreports/reports/<slug>/` | One directory each: `index.html`, `report.json`, `icon.svg`. One home-screen app each. |
 | Tools | `bin/webdata-*` → `/usr/local/bin` | CLI for people and bots. |
 
 ## Data flow
@@ -56,10 +58,10 @@ and listens only on `LISTEN_IP:LISTEN_PORT`.
    (directly with its data tools, or through a scheduled job).
 2. `webdata-sync` sees the file's size/mtime change. It **copies** the
    database (+ WAL) aside, never opening the bot's live file, then writes a fresh
-   snapshot to `webroot/data/<bot name>.duckdb` with
+   snapshot to `data/<bot name>.duckdb` in the content folder with
    `STORAGE_VERSION 'v1.2.0', BLOCK_SIZE 16384`, and renames it into place atomically.
-3. It describes every database in `webroot/data/catalog.json` (tables,
-   columns, types, row counts) and the reports in `webroot/reports/index.json`.
+3. It describes every database in `data/catalog.json` (tables, columns,
+   types, row counts) and the reports in `reports/index.json`.
 4. A few seconds later, once the files have settled, `webdata-bake` renders
    each affected report headless and writes its first render's query results
    to `reports/<slug>/initial.json`; the page preloads that file.
@@ -87,7 +89,7 @@ They're kept on the **same engine version**, so a query tested on the server
 behaves the same in the browser and the browser reads exactly what the bots
 write. DuckDB-WASM is a separate project with its own versions (1.33.1-dev65.0
 contains DuckDB v1.5.6) and often lags a DuckDB release, so:
-- `DUCKDB_WASM_VERSION` (`config.env`) names the browser build; `webdata-sync`
+- `DUCKDB_WASM_VERSION` (`/etc/omb-webreports/config.env`) names the browser build; `webdata-sync`
   writes it into every page's import map, where kit reads it. Changing it
   re-stamps the pages and open ones reload.
 - `admin/openmausbot-upgrade.sh` refuses (or asks) before installing an
@@ -170,7 +172,7 @@ See [data-jobs.md](data-jobs.md).
 **Skills are SKILL.md only.** OpenMausBot imports only `SKILL.md` (supporting
 files are skipped for security), so all logic lives in `bin/` and the skills
 call it. Skills contain no machine paths: they run `webdata-info` to learn
-`ROOT` and `SITE`.
+`SITE`, `REPORTS`, `JOBS`, `DATA` and `DOCS`.
 
 **Skills reach bots three ways, and stay current one way.** Each bot keeps its
 own copy of a skill, so editing `skills/` changes nothing by itself.
@@ -180,16 +182,16 @@ own copy of a skill, so editing `skills/` changes nothing by itself.
   when the content does, so re-importing an unchanged package is a no-op.
 - *`webdata-skills add <bot>`* for existing bots, or OpenMausBot's `/learn`.
 - *`webdata-skills sync`* (run by `admin/install.sh` and
-  `admin/openmausbot-upgrade.sh`) compares each bot's copy with the checkout by
+  `admin/openmausbot-upgrade.sh`) compares each bot's copy with the installed skills by
   SHA-256 and replaces outdated ones through OpenMausBot's API (remove, then
   install the new text; the old copy is put back if that fails), keeping each
   skill on or off as it was. It imports the current preset release and removes
   older ones. Only bots that already have an omb-webreports skill are touched.
 
 Trust: a skill that was on stays on with the new text, without a review in the
-app. The text comes from your checkout, the same source `sudo bash
-admin/install.sh` already trusts with root; review `git log -p -- skills/` after
-a pull if you want to read changes first. The API calls are authorized as
+app. The text comes from the installed program, which came from the
+root-owned clone you chose to install; review `git log -p -- skills/` in the
+clone before updating if you want to read changes first. The API calls are authorized as
 described under "OpenMausBot isolation" below.
 
 ## Security model
@@ -198,32 +200,57 @@ What's exposed is a read-only static site on your tailnet. Assumptions: the
 machine runs only this site's Apache; people on your tailnet may read every
 published database.
 
+**Code is root's, content is yours.** Bots run as the owner, so anything the
+owner can write, a bot can change. Everything that runs as root, or that every
+report runs, therefore lives where only root can write: the source clone
+(`/usr/local/src/omb-webreports`), the installed program
+(`/usr/local/lib/omb-webreports`: tools, skills, template, docs, `/lib/`, the
+gallery, the front page) and the settings (`/etc/omb-webreports`). The owner's
+content folder (`/var/lib/omb-webreports`) holds only what bots are meant to
+write: reports, jobs, and the published data and state the services generate.
+- The installer and update and OpenMausBot-upgrade scripts refuse a source
+  that isn't root-only (the tree and every folder above it), unless given
+  `--from-unsafe-dev` for development, which they log as unsafe
+  ([development.md](development.md)).
+- The installer copies an allowlist of files from the source (refusing
+  unexpected symlinks), so a `git pull` never changes the running system by
+  itself, and records the source and commit in `installed.json`.
+- Root-run code never reads settings a bot could change: `config.env` is
+  root-owned, so a bot can't redirect `OMB_URL` (and the session token) or the
+  install paths. It never `source`s a file the owner can write (migration reads
+  the old `config.env` as data), never runs git in a repository the owner can
+  write (it runs git there as that owner), and changes things inside the content
+  folder as the owner (`runuser`), not following symlinks.
+- The services run the root-owned program as the owner, sandboxed.
+
 **Apache** (`admin/install.sh` writes it):
 - listens only on `LISTEN_IP:LISTEN_PORT`; `Require ip` limits clients to
   `ALLOWED_NETS` (Tailscale ranges by default); only `GET`/`HEAD`;
-- `webroot/` is untrusted content: no `.htaccess` (`AllowOverride None`), no
+- every served folder is untrusted content: no `.htaccess` (`AllowOverride None`), no
   symlinks, no CGI/SSI/handlers (`SetHandler None`), no content negotiation;
 - dotfiles and dot-directories are never served; `/` is denied by default;
 - version hidden, `TRACE` off, `nosniff`, `X-Frame-Options: SAMEORIGIN`,
   `Referrer-Policy: no-referrer`.
 
-**Filesystem.** Apache's user gets traverse-only (`x`) ACLs on the folders
-above `webroot/` and read-only access inside it. It can't list your home,
-the checkout, or OpenMausBot's data.
+**Filesystem.** Apache's user reads the program's site files (world-readable)
+and gets traverse-only (`x`) on the content folder plus read-only ACLs on its
+`reports/` and `data/` (also for new files). It can't read `jobs/`, `.state/`,
+your home or OpenMausBot's data.
 
 **Services** run as you, not root, with `NoNewPrivileges`,
 `ProtectSystem=strict`, `ProtectHome=read-only` and a private `/tmp`.
-`webdata-sync` can write only the checkout (its headless Chrome for baking
-runs inside the same sandbox, with Chrome's own sandbox on); `webdata-jobs` (and every job
-script) only the checkout and OpenMausBot's `bots/` folder.
+`webdata-sync` can write only the content folder (its headless Chrome for
+baking runs inside the same sandbox, with Chrome's own sandbox on);
+`webdata-jobs` (and every job script) only the content folder and OpenMausBot's
+`bots/` folder.
 
 **OpenMausBot isolation.** OpenMausBot's API listens on `127.0.0.1`, and by
 default on a self-hosted server it treats any request from this machine without
 a login as its owner (`OMB_LOOPBACK_TRUST=owner`). Bots' shells run on this
 machine, so a bot (say, one steered by a prompt injection in a page it read)
 could switch on its own skills, loosen its own permissions or change settings
-with a `curl`. With `OMB_LOOPBACK_TRUST=service` in `config.env` (the default in
-`config.example.env`), `admin/install.sh` adds a systemd drop-in to
+with a `curl`. With `OMB_LOOPBACK_TRUST=service` in `/etc/omb-webreports/config.env`
+(the installer's default), `admin/install.sh` adds a systemd drop-in to
 `openmausbot.service` and OpenMausBot refuses local requests that have no login
 (they keep only health, the bot list and the bots' own per-turn routes, which
 carry their own token). Requests that come through a proxy with forwarded
@@ -261,14 +288,17 @@ can read every report and published database: use `exclude_bots` in
 
 ## Files and state
 
-| Path | Contents | In git |
+| Path | Contents | Owner |
 |---|---|---|
-| `config.env` | this machine's settings | no |
-| `webroot/lib/`, `webroot/index.html`, `webroot/reports/_gallery/` | the platform | yes |
-| `webroot/reports/<slug>/` | your reports | no |
-| `webroot/data/` | published snapshots, catalog | no (generated) |
-| `webroot/reports/<slug>/initial.json` | baked first render | no (generated) |
-| `jobs/<name>/` | your data jobs | no |
-| `.state/` | sync and bake state, the baker's Chrome profile, job status and logs | no |
-| `/etc/apache2/…`, `/etc/systemd/system/webdata-*` | written by `admin/install.sh` | — |
+| `/usr/local/src/omb-webreports` | the source clone (installs and updates run from it) | root |
+| `/usr/local/lib/omb-webreports` | the program: `bin/`, `skills/`, `templates/`, `examples/`, docs, `webroot/` (front page, `lib/`, gallery) | root |
+| `/etc/omb-webreports/config.env` | settings | root |
+| `/etc/omb-webreports/installed.json` | what's installed: source, commit, unsafe or not | root |
+| `/etc/omb-webreports/omb-session.json` | webdata-skills' OpenMausBot session (0600) | root |
+| `/var/lib/omb-webreports/reports/<slug>/` | your reports (and their generated icons, manifest, `initial.json`) | you |
+| `/var/lib/omb-webreports/data/` | published snapshots, catalog (generated) | you |
+| `/var/lib/omb-webreports/jobs/<name>/` | your data jobs | you |
+| `/var/lib/omb-webreports/.state/` | sync and bake state, the baker's Chrome profile, job status and logs | you |
+| `/var/cache/omb-webreports/` | which DuckDB engine each DuckDB-WASM build contains | root |
+| `/etc/apache2/…`, `/etc/systemd/system/webdata-*` | written by `admin/install.sh` | root |
 | `/var/log/apache2/webdata-{access,error}.log` | Apache logs (incl. reported browser errors) | — |

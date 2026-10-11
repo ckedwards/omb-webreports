@@ -5,7 +5,7 @@
 //
 // Opens the report in headless Chrome with ?kit-bake. kit runs the first
 // render with the real engine, records every query's rows, and this writes
-// them to webroot/reports/<slug>/initial.json. webdata-sync then links the
+// them to <reports>/<slug>/initial.json. webdata-sync then links the
 // file from the page (a preload in the webdata:modules block), and kit uses
 // the rows only for the database versions they came from. Report code needs
 // nothing for this; filters and later queries still run in the browser.
@@ -22,7 +22,7 @@ import { execFile } from 'node:child_process';
 import fs from 'node:fs';
 import path from 'node:path';
 
-import { ROOT, LOCAL_URL } from './_config.mjs';
+import { LOCAL_URL, REPORTS_DIR, STATE_DIR } from './_config.mjs';
 import { BAKE_FILE, BAKE_STATE, bakeConfig, bakeTargets, dueTargets, readBakeState } from './_bake.mjs';
 
 const args = process.argv.slice(2);
@@ -35,7 +35,6 @@ const all = args.includes('--all');
 const slugs = args.filter((a) => !a.startsWith('--'));
 const manual = all || slugs.length > 0;
 
-const STATE_DIR = path.join(ROOT, '.state');
 const LOCK = path.join(STATE_DIR, 'bake.lock');
 const PROFILE = path.join(STATE_DIR, 'bake-chrome');   // keeps DuckDB-WASM in Chrome's HTTP cache
 const TIMEOUT_MS = 90_000;                             // per report
@@ -182,7 +181,7 @@ try {
   log(`bake failed: ${e.message}`);
 } finally {
   for (const slug of Object.keys(state)) {
-    if (!fs.existsSync(path.join(ROOT, 'webroot', 'reports', slug))) delete state[slug];
+    if (!fs.existsSync(path.join(REPORTS_DIR, slug))) delete state[slug];
   }
   fs.writeFileSync(BAKE_STATE, JSON.stringify(state, null, 2) + '\n');
   await new Promise((r) => execFile(AB || 'true', ['--session', 'bake', 'close'], { env, timeout: 10_000 }, () => r()));

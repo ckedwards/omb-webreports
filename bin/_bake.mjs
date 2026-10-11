@@ -4,11 +4,10 @@
 import fs from 'node:fs';
 import path from 'node:path';
 
-import { ROOT } from './_config.mjs';
+import { PLATFORM_DIR, PUBLISHED_DIR, REPORTS_DIR, STATE_DIR, SYNC_JSON } from './_config.mjs';
 
-const WEB = path.join(ROOT, 'webroot');
-const REPORTS = path.join(WEB, 'reports');
-export const BAKE_STATE = path.join(ROOT, '.state', 'bake.json');
+const REPORTS = REPORTS_DIR;
+export const BAKE_STATE = path.join(STATE_DIR, 'bake.json');
 export const BAKE_FILE = 'initial.json';
 const QUIET_MS = 5_000;        // inputs unchanged this long before baking (bots write in bursts)
 const RETRY_MS = 10 * 60_000;  // retry a failed bake with unchanged inputs after this
@@ -17,7 +16,7 @@ const readJSON = (file, fallback) => { try { return JSON.parse(fs.readFileSync(f
 
 /** sync.json settings for baking. */
 export function bakeConfig() {
-  const c = readJSON(path.join(ROOT, 'sync.json'), {});
+  const c = readJSON(SYNC_JSON, {});
   return { enabled: c.bake !== false, maxBytes: (Number(c.bake_max_kb) || 1024) * 1024 };
 }
 
@@ -36,8 +35,8 @@ export function bakeTargets() {
     let html;
     try { html = fs.readFileSync(path.join(dir, 'index.html'), 'utf8'); } catch { continue; }
     if (!html.includes('<!-- webdata:modules') || !/from ['"]\/lib\/kit\.js['"]/.test(html)) continue;
-    const inputs = [path.join(dir, 'index.html'), path.join(dir, 'report.json'), path.join(WEB, 'lib', 'kit.js'),
-      ...dbs.map((d) => path.join(WEB, 'data', `${d}.duckdb`))];
+    const inputs = [path.join(dir, 'index.html'), path.join(dir, 'report.json'), path.join(PLATFORM_DIR, 'lib', 'kit.js'),
+      ...dbs.map((d) => path.join(PUBLISHED_DIR, `${d}.duckdb`))];
     let newest = 0;
     const sig = inputs.map((f) => {
       try { const s = fs.statSync(f); newest = Math.max(newest, s.mtimeMs); return `${s.size}:${s.mtimeMs}`; } catch { return '-'; }

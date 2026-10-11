@@ -6,14 +6,14 @@
 //   webdata-ls data       databases with every table and its columns
 //   webdata-ls <slug>     one report: metadata, files, the databases it uses
 //
-// Reads the generated webroot/reports/index.json and webroot/data/catalog.json;
+// Reads the generated <data>/reports/index.json and <data>/data/catalog.json;
 // run `webdata-sync --once` first if something was just changed.
 
 import fs from 'node:fs';
 import path from 'node:path';
 
-import { ROOT, SITE_URL } from './_config.mjs';
-const WEB = path.join(ROOT, 'webroot');
+import { DATA_DIR, REPORTS_DIR, SITE_URL } from './_config.mjs';
+const WEB = DATA_DIR;   // reports/ and data/ live here, as on the site
 const SITE = SITE_URL;
 
 const readJSON = (f) => JSON.parse(fs.readFileSync(path.join(WEB, f), 'utf8'));

@@ -73,6 +73,7 @@ More in [docs/architecture.md](docs/architecture.md).
 | DuckDB-WASM (in the browser) | 1.33.1-dev65.0 = DuckDB v1.5.6 | Loaded from jsDelivr. **Kept on the same DuckDB version as OpenMausBot's** by the upgrade script, which won't move to a release without a matching build unless you say so. |
 | Node.js | 24 (20+ required) | NodeSource packages. |
 | Apache httpd | 2.4.66 | Installed by `admin/install.sh`; **dedicated to this site** (it rewrites `ports.conf`). |
+| git | | The source is a root-owned clone; updates are `git pull`s (`admin/update.sh`). |
 | Tailscale | 1.104 | Private access + HTTPS via `tailscale serve`. |
 | agent-browser + Chrome | 0.37.0 + Chrome for Testing 155 | `openmausbot browser install --with-deps`; used to check reports and to scrape JS-rendered pages. |
 | Python 3, `acl` | 3.14 | Python for job scripts; `acl` installed by the installer. |
@@ -83,16 +84,21 @@ Full guide with explanations: **[docs/setup.md](docs/setup.md)**.
 
 ```bash
 # 1–2: base packages, Tailscale; 3: Node.js, then (docs/setup.md):
-git clone https://github.com/ckedwards/omb-webreports.git ~/omb-webreports
-cd ~/omb-webreports
-admin/openmausbot-upgrade.sh         # OpenMausBot + native modules + matching browser DuckDB
+sudo git clone https://github.com/ckedwards/omb-webreports.git /usr/local/src/omb-webreports
+cd /usr/local/src/omb-webreports
+sudo admin/openmausbot-upgrade.sh    # OpenMausBot + native modules + matching browser DuckDB
 # 4–5: OpenMausBot service, Chrome (docs/setup.md)
 
-$EDITOR config.env                   # set LISTEN_IP / SITE_URL if the defaults don't fit
-sudo bash admin/install.sh           # Apache + services + tools on PATH
 tailscale serve --bg --https=8443 http://$(tailscale ip -4):8080   # HTTPS for phones
-webdata-info                         # paths, URL, versions, service status
+sudo admin/install.sh                # asks a few questions; Apache, services, tools on PATH
+webdata-info                         # locations, URL, versions, service status
+# later: sudo admin/update.sh        # git pull + install
 ```
+
+The source is cloned **as root** on purpose: root runs the installer and the
+code it installs, so nothing your user (or a bot running as you) can write may
+reach it. Your reports and jobs live in `/var/lib/omb-webreports`, owned by you.
+Working on omb-webreports itself: [docs/development.md](docs/development.md).
 
 Open `SITE_URL/reports/_gallery/` to see the design gallery, then teach your
 bots the skills ([setup step 9](docs/setup.md#9-teach-your-bots-the-skills)).
@@ -110,7 +116,7 @@ From a shell:
 
 | Command | What it does |
 |---|---|
-| `webdata-info` | install dir, site URL, versions, service status |
+| `webdata-info` | where reports, jobs, data and docs are; site URL; versions; services; what's installed |
 | `webdata-ls [reports\|data\|<slug>]` | list reports and published databases |
 | `webdata-sql "<SQL>"` | query the published databases as reports see them |
 | `webdata-new-report <slug> "<Title>" <db>` | scaffold a report |
@@ -129,6 +135,7 @@ From a shell:
 | [docs/architecture.md](docs/architecture.md) | Components, data flow, freshness, security model, design decisions |
 | [docs/operations.md](docs/operations.md) | Day-to-day commands, logs, troubleshooting, upgrades, uninstall |
 | [docs/data-jobs.md](docs/data-jobs.md) | Scheduled data jobs and failure notifications |
+| [docs/development.md](docs/development.md) | Working on omb-webreports: a dev checkout, unsafe dev installs, testing the installer |
 | [docs/future-work.md](docs/future-work.md) | Improvements designed but not built yet, and when they'd be worth it |
 | [READ_FIRST.md](READ_FIRST.md) | The guide agents read before touching reports (also `CLAUDE.md`, `AGENTS.md`) |
 | [DESIGN.md](DESIGN.md) | The design system: layout, tokens, components, chart recipes, words |
@@ -137,19 +144,23 @@ From a shell:
 ## Repository layout
 
 ```
-admin/install.sh         system side (Apache, systemd units, tools on PATH); run with sudo
+admin/install.sh         installs (as root, from a root-owned clone): the program to
+                         /usr/local/lib/omb-webreports, settings, content folder, Apache, services
+admin/update.sh          git pull + install; --from-unsafe-dev for a development checkout
 admin/openmausbot-upgrade.sh  install/upgrade OpenMausBot + its native modules; keeps the
                          browser's DuckDB (DuckDB-WASM) on the same version as OpenMausBot's
 bin/                     the webdata-* tools
-config.example.env       settings template → config.env (git-ignored)
+config.example.env       every setting in /etc/omb-webreports/config.env, explained
 docs/                    user documentation
 examples/reports/        a complete real report to study
-jobs/                    your scheduled data jobs (git-ignored)
 skills/                  Agent Skills for bots, and omb-webreports.openmaus.json (generated
                          OpenMausBot package: the skills + the Report builder preset)
 templates/report/        the starter report webdata-new-report copies
-webroot/                 the served site: front page, lib/ (kit), reports/ (yours are git-ignored)
+webroot/                 the shared site files: front page, lib/ (kit), reports/_gallery/
 ```
+
+Your reports, jobs and published data are never in the repository: they live in
+`/var/lib/omb-webreports` on the machine.
 
 ## Status
 

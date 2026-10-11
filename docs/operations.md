@@ -3,7 +3,7 @@
 ## Everyday commands
 
 ```bash
-webdata-info                       # paths, site URL, versions, service status
+webdata-info                       # locations (SITE, REPORTS, JOBS, DATA, DOCS), versions, services, what's installed
 webdata-ls                         # reports + databases (main tables)
 webdata-ls data                    # every table with columns and types
 webdata-ls <slug>                  # one report: link, files, tables it uses
@@ -14,7 +14,7 @@ webdata-new-report <slug> "<Title>" <bot> "<description>"
 webdata-sync --once                # one sync pass now; prints warnings (bad report.json, …)
 webdata-bake <slug>                # re-bake a report's first render now (the service does this itself)
 webdata-job list                   # scheduled jobs: last result, next run (see data-jobs.md)
-webdata-skills status              # bots with the omb-webreports skills: current or outdated
+sudo webdata-skills status         # bots with the omb-webreports skills: current or outdated
 ```
 
 ## Services and logs
@@ -31,15 +31,26 @@ group. Every page loads `lib/report-errors.js` first, which reports JavaScript
 errors as `GET /_client-error?…` requests; the server answers 404 and the access
 log keeps them for `webdata-errors`.
 
+## Where things are
+
+| | Where | Owner |
+|---|---|---|
+| Settings | `/etc/omb-webreports/config.env` | root |
+| What's installed (source, commit) | `/etc/omb-webreports/installed.json` | root |
+| The program (tools, skills, docs, shared site files) | `/usr/local/lib/omb-webreports` | root |
+| The source clone (installs and updates run from it) | `/usr/local/src/omb-webreports` | root |
+| Reports, published data, jobs, state | `/var/lib/omb-webreports` (`DATA_DIR`) | you |
+
 ## Settings
 
-- `config.env`: owner, listen address, allowed networks, site URL, paths.
-  After changing the listen address, port or networks, re-run
-  `sudo bash admin/install.sh`. `SITE_URL` and paths are read by the tools on each run.
-- `sync.json` (optional, git-ignored):
+- `/etc/omb-webreports/config.env`: owner, content folder, listen address,
+  allowed networks, site URL, paths, OpenMausBot isolation. Edit it as root,
+  then re-run `sudo /usr/local/src/omb-webreports/admin/install.sh`. The tools read it on
+  each run.
+- `DATA_DIR/sync.json` (optional, yours to edit):
   `{ "exclude_bots": ["SomeBot"], "poll_seconds": 3, "bake": true, "bake_max_kb": 1024 }`.
   Excluded bots are never published; delete an already-published
-  `webroot/data/<bot>.duckdb` by hand. `"bake": false` turns off baked first
+  `DATA_DIR/data/<bot>.duckdb` by hand. `"bake": false` turns off baked first
   renders (reports then start DuckDB-WASM on every first visit);
   `bake_max_kb` skips reports whose first render returns more than that.
 
@@ -78,20 +89,20 @@ that's the Tailscale address and Tailscale isn't up, Apache retries every 5 s
 until it is. For the HTTPS URL: `tailscale serve status`.
 
 **403 Forbidden.** The client isn't in `ALLOWED_NETS`, the request isn't
-GET/HEAD, or the path contains a dotfile. A 403 on everything right after
-moving the checkout means Apache lost access to the folders above it: re-run
-`sudo bash admin/install.sh`.
+GET/HEAD, or the path contains a dotfile. A 403 on all reports means Apache
+lost read access to `DATA_DIR` (its ACLs): re-run
+`sudo /usr/local/src/omb-webreports/admin/install.sh`.
 
 **`engine_unavailable` / DuckDB did not load** (in OpenMausBot, or the
 tools fail to import `@duckdb/node-api`). The native modules are missing or
-don't match the OpenMausBot release: `admin/openmausbot-upgrade.sh`
+don't match the OpenMausBot release: `sudo /usr/local/src/omb-webreports/admin/openmausbot-upgrade.sh`
 (see [setup step 3](setup.md#3-openmausbot-and-its-native-modules)).
 
 **A query works in `webdata-sql` but fails in the browser (or the other way
 round), or reports show a DuckDB error after an upgrade.** The browser's DuckDB
 may not match OpenMausBot's. `webdata-info` shows both ("browser DuckDB");
 `admin/openmausbot-upgrade.sh --check` checks them properly. To realign, re-run
-`admin/openmausbot-upgrade.sh <installed openmausbot version>`: it re-pins
+`sudo admin/openmausbot-upgrade.sh <installed openmausbot version>` (in the source clone): it re-pins
 `DUCKDB_WASM_VERSION` and restarts sync, which re-stamps every page. If no
 matching browser build exists yet (an upgrade made with `--skip-browser-check`),
 either go back to the release the check names, or wait for a DuckDB-WASM build
@@ -115,15 +126,17 @@ Remote access) and run `sudo webdata-skills login --code <code>`.
 **omb-webreports:**
 
 ```bash
-cd ~/omb-webreports
-git pull
-sudo bash admin/install.sh      # applies changes to Apache/services; safe to repeat
+sudo /usr/local/src/omb-webreports/admin/update.sh               # fast-forward the clone's branch, then install
+sudo /usr/local/src/omb-webreports/admin/update.sh --ref v1.2.0  # or a tag, branch or commit
 ```
 
-The installer ends with `webdata-skills sync`: bots that have the
+It refuses if the clone isn't root-owned or has local changes, then runs the
+new installer, which copies the program to `/usr/local/lib/omb-webreports`
+and restarts the services. (Developing omb-webreports itself:
+[development.md](development.md).) The installer ends with `webdata-skills sync`: bots that have the
 omb-webreports skills get the new versions (each stays on or off as it was), and
 the Report builder preset is replaced by the new release. To see what changed
-first: `git log -p -- skills/`; to preview: `webdata-skills sync --dry-run`.
+first: `git -C /usr/local/src/omb-webreports log -p -- skills/`; to preview: `webdata-skills sync --dry-run`.
 
 **Bots' skills, by hand** (with `sudo` when OpenMausBot is isolated, the default):
 
@@ -148,16 +161,17 @@ sudo webdata-skills logout              # revoke it
 systemctl list-timers webdata-omb-session.timer   # the daily renewal; journalctl -u webdata-omb-session
 ```
 
-To turn isolation off: `OMB_LOOPBACK_TRUST=owner` (or empty) in `config.env`,
-then `sudo bash admin/install.sh`.
+To turn isolation off: `OMB_LOOPBACK_TRUST=owner` (or empty) in
+`/etc/omb-webreports/config.env`, then `sudo /usr/local/src/omb-webreports/admin/install.sh`.
 
 **OpenMausBot:** always through the script, so its native modules and the
 browser's DuckDB match:
 
 ```bash
+cd /usr/local/src/omb-webreports
 admin/openmausbot-upgrade.sh --check            # versions, match, newest release with a match
-admin/openmausbot-upgrade.sh                    # latest
-admin/openmausbot-upgrade.sh 0.1.107            # or a specific version (also rolls back)
+sudo admin/openmausbot-upgrade.sh               # latest
+sudo admin/openmausbot-upgrade.sh 0.1.107       # or a specific version (also rolls back)
 ```
 
 Before changing anything it looks for the DuckDB-WASM build with the target's
@@ -178,10 +192,12 @@ sudo rm /etc/systemd/system/apache2.service.d/tailscale.conf
 sudo a2dissite webdata && sudo a2disconf zz-reports-hardening
 sudo rm /etc/apache2/sites-available/webdata.conf /etc/apache2/conf-available/zz-reports-hardening.conf
 sudo rm /usr/local/bin/webdata-*
+sudo rm -r /usr/local/lib/omb-webreports /usr/local/src/omb-webreports /var/cache/omb-webreports
 sudo systemctl daemon-reload
 tailscale serve --https=8443 off
 ```
 
 Apache stays installed; restore `/etc/apache2/ports.conf` (`Listen 80`) and
-re-enable `000-default` if you use it for something else. The checkout, your
-reports and OpenMausBot's data are untouched; delete the checkout yourself.
+re-enable `000-default` if you use it for something else. Your content in
+`/var/lib/omb-webreports` and OpenMausBot's data are untouched; delete the
+content folder yourself if you don't want it.

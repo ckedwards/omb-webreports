@@ -5,7 +5,7 @@
 //   webdata-sql --json "SELECT ..."        JSON rows instead of a text table
 //   webdata-sql --all "SELECT ..."         no 200-row display cap
 //
-// Every webroot/data/<name>.duckdb is attached read-only as <name>, so the
+// Every published <data>/data/<name>.duckdb is attached read-only as <name>, so the
 // SQL is the same SQL a report runs in the browser (<name>.main.<table>).
 // The engine here is OpenMausBot's DuckDB; the browser runs the same version
 // (DUCKDB_WASM_VERSION, see webdata-info). Confirm in the browser with webdata-check.
@@ -14,8 +14,8 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { pathToFileURL } from 'node:url';
 
-import { ROOT, NODE_MODULES_DIR } from './_config.mjs';
-const DATA = path.join(ROOT, 'webroot', 'data');
+import { PUBLISHED_DIR, NODE_MODULES_DIR } from './_config.mjs';
+const DATA = PUBLISHED_DIR;
 const NODE_MODULES = NODE_MODULES_DIR;
 
 const args = process.argv.slice(2);

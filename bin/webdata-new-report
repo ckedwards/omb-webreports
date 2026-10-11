@@ -4,20 +4,24 @@
 #   webdata-new-report <slug> "<Title>" <database> [description]
 #   webdata-new-report blue-jays-2026 "Blue Jays 2026" mybot "Season stats"
 #
-# Creates webroot/reports/<slug>/ with index.html (a working table explorer
-# to replace), report.json and an icon.svg, then runs a sync so it shows up.
+# Creates <reports>/<slug>/ (REPORTS in webdata-info) with index.html (a
+# working table explorer to replace), report.json and an icon.svg, then runs a
+# sync so it shows up.
 set -euo pipefail
 
 ROOT=$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/.." && pwd)
+while IFS='=' read -r k v; do
+  case $k in REPORTS_DIR) REPORTS=$v ;; PUBLISHED_DIR) PUBLISHED=$v ;; PLATFORM_DIR) PLATFORM=$v ;; SITE_URL) SITE=$v ;; esac
+done < <(node "$ROOT/bin/_config.mjs")
 slug=${1:-}; title=${2:-}; db=${3:-}; desc=${4:-}
 if [[ -z $slug || -z $title || -z $db ]]; then
-  sed -n '2,8p' "$0" | sed 's/^# \{0,1\}//'
+  sed -n '2,9p' "$0" | sed 's/^# \{0,1\}//'
   exit 1
 fi
 [[ $slug =~ ^[a-z0-9][a-z0-9-]*$ ]] || { echo "slug must be lowercase-kebab-case"; exit 1; }
-[[ -e $ROOT/webroot/data/$db.duckdb ]] || {
-  echo "no database '$db' in webroot/data. Available:"; ls "$ROOT/webroot/data" | grep -E '\.duckdb$' | sed 's/\.duckdb$/  /'; exit 1; }
-dest=$ROOT/webroot/reports/$slug
+[[ -e $PUBLISHED/$db.duckdb ]] || {
+  echo "no published database '$db'. Available:"; ls "$PUBLISHED" | grep -E '\.duckdb$' | sed 's/\.duckdb$/  /'; exit 1; }
+dest=$REPORTS/$slug
 [[ -e $dest ]] && { echo "$dest already exists"; exit 1; }
 
 mkdir -p "$dest"

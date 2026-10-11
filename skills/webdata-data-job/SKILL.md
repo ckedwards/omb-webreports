@@ -6,9 +6,12 @@ tags: webdata, duckdb, cron, schedule, data
 
 # Scheduled data jobs
 
-**First run `webdata-info`.** It prints `ROOT` (the install directory) and
-`SITE` (the site's URL); below, `ROOT/...` and `SITE/...` mean those. The
-`webdata-*` commands are on `PATH`.
+**First run `webdata-info`.** It prints `SITE` (the site's URL), `REPORTS`
+(where reports live), `JOBS` (scheduled data jobs), `DATA` (the published
+databases and `catalog.json`) and `DOCS` (read-only: READ_FIRST.md, DESIGN.md,
+examples); below, `REPORTS/...`, `SITE/...` and so on mean those. The
+`webdata-*` commands are on `PATH`. The shared code and docs are root-owned:
+you can read them, not change them.
 
 A job re-collects data on a schedule by running a **script you write once**.
 At run time there is no AI: the scheduler (`webdata-jobs` service) runs the
@@ -17,7 +20,7 @@ script, validates its output, and writes it into your bot's database
 about 20 seconds after a run.
 
 ```
-ROOT/jobs/<name>/
+JOBS/<name>/
   job.json     bot, schedule, timezone, tables, enabled
   run.py       the script (or run.mjs / run.sh)
   .env         optional secrets, KEY=value, chmod 600
@@ -100,7 +103,8 @@ table is produced and passes the checks.
 - **Python 3 standard library only** (`urllib.request`, `json`, `csv`,
   `html.parser`, `datetime`, `subprocess`), or `run.mjs` with Node's built-in
   `fetch`. Installing packages is not possible: jobs run in a sandbox where only
-  `ROOT`, the bots' database folders and a private `/tmp` are writable.
+  the omb-webreports data folder (REPORTS, JOBS, DATA), the bots' database
+  folders and a private `/tmp` are writable.
   For JavaScript-rendered pages use `webdata-browse` (3b), never another browser setup.
 - **`fetched_at`**: if the table has a `fetched_at` column (briefing tables
   always do), set it on every row to the time of this run, in UTC, written
@@ -117,7 +121,7 @@ table is produced and passes the checks.
   (row count in a sane range, required fields present) and `sys.exit("why")`
   otherwise.
 - Secrets (API keys) go in `jobs/<name>/.env` (`chmod 600`), read via
-  `os.environ`. Never put them in the script, job.json or anything under webroot.
+  `os.environ`. Never put them in the script, job.json or anything under REPORTS or DATA.
 - Print a line or two of progress; output goes to the run log.
 - Env available: `WEBDATA_OUT`, `WEBDATA_JOB`, `WEBDATA_BOT`,
   `WEBDATA_DRY_RUN` (`1` on dry runs), `WEBDATA_SNAPSHOT` (path to a
@@ -183,7 +187,7 @@ webdata-job run <name> --dry-run
 This runs the script and stages and validates the output against your
 current tables, but writes nothing. Read the whole output: row counts, column
 names and types, "columns differ" errors. Fix and repeat until it says
-`dry run OK`. The staged files are in `ROOT/.state/jobs/<name>/out/` if
+`dry run OK`. The staged files are where the dry run's last line says if
 you need to look.
 
 Then run it for real and check the result:
@@ -221,7 +225,7 @@ Tell them: what it updates, when (with timezone), the next run time from
 - **Failures**: `logs` shows the reason. Nothing was written, so the old data
   stays. See "Fixing a failed job" below.
 - **Remove** (only after the person confirms): `disable`, then
-  `rm -r ROOT/jobs/<name>`. The tables it filled stay in the database.
+  `rm -r JOBS/<name>`. The tables it filled stay in the database.
 
 ## Fixing a failed job
 
@@ -254,9 +258,9 @@ When a *scheduled* run fails, the runner can notify the bot through an
 OpenMausBot webhook: on the first failure, then at most once a day while it
 keeps failing. The person sets this up: they create a webhook for the bot in
 OpenMausBot and add a line `<BotName>=<webhook URL>` to
-`ROOT/jobs/.notify.env` (chmod 600). `webdata-job notify-test <bot>`
+`JOBS/.notify.env` (chmod 600). `webdata-job notify-test <bot>`
 sends a test event. Never print or copy the webhook URL anywhere else; it
 contains the secret.
 
 Only touch your own jobs and your own bot's tables. Never edit another
-bot's job, ``, or `ROOT/admin/`.
+bot's job.

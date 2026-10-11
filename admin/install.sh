@@ -1,81 +1,198 @@
 #!/usr/bin/env bash
-# omb-webreports installer: the system side (Apache, systemd units, tools on
-# PATH). Idempotent: re-run after pulling changes or editing config.env.
+# omb-webreports installer. Root runs it, so run it from a root-owned clone:
 #
-#   sudo bash admin/install.sh           install / update
-#   sudo bash admin/install.sh --print   show every file it would write; change nothing
+#   sudo git clone https://github.com/ckedwards/omb-webreports /usr/local/src/omb-webreports
+#   sudo /usr/local/src/omb-webreports/admin/install.sh     first install asks a few questions
+#   sudo /usr/local/src/omb-webreports/admin/update.sh      later: git pull, then this
 #
-# Reads ../config.env (see config.example.env). Sets up:
-#   - Apache, dedicated to this site: listens only on LISTEN_IP:LISTEN_PORT,
-#     serves webroot/ read-only and hardened, GET/HEAD only, from ALLOWED_NETS
-#   - webdata-sync.service: publishes bot databases, catalog, report index
-#   - webdata-jobs.service: runs scheduled data jobs (jobs/*)
-#   - /usr/local/bin/webdata-* symlinks to the tools in bin/
-# Everything else (reports, jobs, docs) needs no root.
+# Options:
+#   --print              show every system file it would write; change nothing
+#   --yes                first install: take the defaults (or answers from the
+#                        environment, e.g. WEBREPORTS_OWNER=you) without asking
+#   --migrate-from DIR   first install: take the settings, reports, jobs and
+#                        sync.json from an old-layout checkout (e.g. ~/webdata)
+#   --from-unsafe-dev    install from a checkout a non-root user can write
+#                        (development). Logged as unsafe; never for production.
+#   --destdir DIR        testing: write everything under DIR, skip what needs root
+#
+# What it sets up:
+#   /usr/local/lib/omb-webreports      the program: a root-owned copy of the tools,
+#                                      skills, template, agent docs and site files
+#   /etc/omb-webreports/config.env     settings (root-owned); installed.json says
+#                                      which source and commit is installed
+#   DATA_DIR (/var/lib/omb-webreports) your reports, published data, jobs and state,
+#                                      owned by WEBREPORTS_OWNER (who runs OpenMausBot)
+#   Apache (dedicated to this site), webdata-sync, webdata-jobs, the OpenMausBot
+#   isolation drop-in and session timer, and the webdata-* tools in /usr/local/bin.
 set -euo pipefail
 
-HERE=$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")" && pwd)
-ROOT=$(cd "$HERE/.." && pwd)
-DOCROOT=$ROOT/webroot
-PRINT=0
-[[ ${1:-} == --print ]] && PRINT=1
+SRC=$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/.." && pwd)
+# shellcheck source=_lib.sh
+source "$SRC/admin/_lib.sh"
 
-die() { echo "error: $*" >&2; exit 1; }
-warn() { echo "warning: $*" >&2; }
+PRINT=0 YES=0 UNSAFE=0 D="" MIGRATE=""
+while (( $# )); do
+  case $1 in
+    --print) PRINT=1 ;;
+    --yes) YES=1 ;;
+    --from-unsafe-dev) UNSAFE=1 ;;
+    --migrate-from) MIGRATE=$(readlink -f "${2:?--migrate-from needs a directory}"); shift ;;
+    --destdir) D=$(readlink -f "${2:?--destdir needs a directory}"); shift ;;
+    -h|--help) sed -n '2,/^set -euo/p' "$0" | sed -e '/^set -euo/d' -e 's/^# \{0,1\}//'; exit 0 ;;
+    *) die "unknown option: $1 (see --help)" ;;
+  esac
+  shift
+done
+TEST=0; [[ -n $D ]] && TEST=1
+(( TEST || PRINT || EUID == 0 )) || die "run as root: sudo $0"
 
-[[ $EUID -eq 0 || $PRINT -eq 1 ]] || die "run as root: sudo bash $0"
+PREFIX=/usr/local/lib/omb-webreports
+CONF_DIR=/etc/omb-webreports
+CONFIG=$CONF_DIR/config.env
+LOOPBACK_DROPIN=/etc/systemd/system/openmausbot.service.d/omb-webreports-loopback.conf
+TOOLS=(webdata-info webdata-ls webdata-sql webdata-check webdata-new-report webdata-job webdata-browse webdata-errors webdata-sync webdata-bake webdata-skills)
+NODE=$(command -v node || true)
+[[ -n $NODE ]] || die "node not found (Node.js 20+ is required; see docs/setup.md)"
+asowner() { if (( TEST )); then "$@"; else runuser -u "$WEBREPORTS_OWNER" -- "$@"; fi; }
 
-# --- configuration ------------------------------------------------------------
-[[ -f $ROOT/config.env ]] || die "no $ROOT/config.env. Create it: cp config.example.env config.env (then edit)"
-# shellcheck disable=SC1091
-source "$ROOT/config.env"
+# --- the source: root runs all of it ---------------------------------------------
+check_source "$SRC" "$UNSAFE"
 
-OWNER=${WEBREPORTS_OWNER:-${SUDO_USER:-}}
-[[ -n $OWNER && $OWNER != root ]] || die "set WEBREPORTS_OWNER in config.env (the user that runs OpenMausBot)"
-id "$OWNER" >/dev/null 2>&1 || die "user $OWNER does not exist"
-HOME_DIR=$(getent passwd "$OWNER" | cut -d: -f6)
-LISTEN_IP=${LISTEN_IP:-$(tailscale ip -4 2>/dev/null | head -1 || true)}
-[[ -n $LISTEN_IP ]] || die "set LISTEN_IP in config.env (Tailscale not found to pick a default)"
+# --- settings --------------------------------------------------------------------
+declare -A OLD=()
+if [[ -n $MIGRATE ]]; then
+  [[ -d $MIGRATE/webroot ]] || die "--migrate-from $MIGRATE: not an old-layout checkout (no webroot/)"
+  while IFS='=' read -r k v; do OLD[$k]=$v; done < <(read_env_file "$MIGRATE/config.env")
+fi
+# The value for KEY: environment, then the old checkout's config.env, then DEFAULT.
+answer_default() { local k=$1 def=$2; [[ -n ${!k:-} ]] && def=${!k}; [[ -n ${OLD[$k]:-} ]] && def=${OLD[$k]}; printf '%s' "$def"; }
+ask() {
+  local k=$1 q=$2 def=$3 a=""
+  def=$(answer_default "$k" "$def")
+  if (( ! YES )) && [[ -t 0 ]]; then read -r -p "$q [$def]: " a; fi
+  printf -v "$k" '%s' "${a:-$def}"
+}
+
+first_run_config() {
+  echo "First install: a few settings for $D$CONFIG (change them there later, then re-run this)."
+  local owner_def=${SUDO_USER:-}; [[ $owner_def == root ]] && owner_def=""
+  ask WEBREPORTS_OWNER "The user that runs OpenMausBot (owns the reports and jobs)" "$owner_def"
+  [[ -n $WEBREPORTS_OWNER && $WEBREPORTS_OWNER != root ]] || die "WEBREPORTS_OWNER must be the (non-root) user that runs OpenMausBot"
+  id "$WEBREPORTS_OWNER" >/dev/null 2>&1 || die "user $WEBREPORTS_OWNER does not exist"
+  local home; home=$(getent passwd "$WEBREPORTS_OWNER" | cut -d: -f6)
+  ask DATA_DIR "Where your reports, published data and jobs live" /var/lib/omb-webreports
+  ask LISTEN_IP "Address Apache listens on" "$(tailscale ip -4 2>/dev/null | head -1 || true)"
+  [[ -n $LISTEN_IP ]] || die "LISTEN_IP is required (Tailscale wasn't found to suggest one)"
+  ask LISTEN_PORT "Port" 8080
+  [[ $LISTEN_PORT =~ ^[0-9]+$ ]] || die "LISTEN_PORT must be a number"
+  ask ALLOWED_NETS "Networks allowed to read the site" "100.64.0.0/10 fd7a:115c:a1e0::/48"
+  local site_def="http://$LISTEN_IP:$LISTEN_PORT" https
+  https=$(tailscale serve status 2>/dev/null | awk -v t="$LISTEN_IP:$LISTEN_PORT" '/^https:\/\//{u=$1} index($0,t){if(u)print u; exit}' || true)
+  [[ -n $https ]] && site_def=${https%/}
+  ask SITE_URL "The address people open (the HTTPS one, if you use tailscale serve)" "$site_def"
+  ask OMB_DATA_DIR "OpenMausBot's data folder" "$home/.openmausbot"
+  ask NODE_MODULES_DIR "Global node_modules with OpenMausBot's native modules" /usr/lib/node_modules
+  ask OMB_LOOPBACK_TRUST "Isolate OpenMausBot from local programs, bots included (service / owner / empty)" service
+  [[ $OMB_LOOPBACK_TRUST =~ ^(|owner|service)$ ]] || die "OMB_LOOPBACK_TRUST must be service, owner or empty"
+  OMB_URL=$(answer_default OMB_URL http://127.0.0.1:8799)
+  # The browser's DuckDB-WASM must contain OpenMausBot's DuckDB engine.
+  DUCKDB_WASM_VERSION=$(answer_default DUCKDB_WASM_VERSION "")
+  if [[ -z $DUCKDB_WASM_VERSION ]]; then
+    local api match
+    api=$("$NODE" -p "require('$NODE_MODULES_DIR/@duckdb/node-api/package.json').version" 2>/dev/null || true)
+    if [[ -n $api ]] && match=$(timeout 180 "$NODE" "$SRC/admin/duckdb-wasm.mjs" match "$api" 2>/dev/null); then
+      DUCKDB_WASM_VERSION=$(sed -n 's/^wasm=//p' <<<"$match")
+    else
+      DUCKDB_WASM_VERSION=$(OMB_WEBREPORTS_CONFIG=/nonexistent "$NODE" --input-type=module -e "console.log((await import('$SRC/bin/_config.mjs')).DUCKDB_WASM_VERSION)")
+      warn "couldn't look up the DuckDB-WASM build for @duckdb/node-api ${api:-?}; using $DUCKDB_WASM_VERSION (admin/openmausbot-upgrade.sh --check)"
+    fi
+  fi
+  mkdir -p "$D$CONF_DIR"
+  cat > "$D$CONFIG" <<EOF
+# omb-webreports settings, written by admin/install.sh (first install).
+# Edit as root, then re-run admin/install.sh. Keys: config.example.env in the source.
+WEBREPORTS_OWNER=$WEBREPORTS_OWNER
+DATA_DIR=$DATA_DIR
+PLATFORM_DIR=$PREFIX/webroot
+LISTEN_IP=$LISTEN_IP
+LISTEN_PORT=$LISTEN_PORT
+ALLOWED_NETS="$ALLOWED_NETS"
+SITE_URL=$SITE_URL
+OMB_DATA_DIR=$OMB_DATA_DIR
+NODE_MODULES_DIR=$NODE_MODULES_DIR
+OMB_URL=$OMB_URL
+OMB_LOOPBACK_TRUST=$OMB_LOOPBACK_TRUST
+# Set by admin/openmausbot-upgrade.sh: the DuckDB-WASM build with the same DuckDB as OpenMausBot.
+DUCKDB_WASM_VERSION=$DUCKDB_WASM_VERSION
+EOF
+  chmod 0644 "$D$CONFIG"
+  echo "wrote $D$CONFIG"
+}
+
+if [[ ! -f $D$CONFIG ]]; then
+  (( PRINT )) && die "not installed yet: --print needs $CONFIG (run the install once)"
+  first_run_config
+fi
+if (( ! TEST )); then
+  [[ $(stat -c %u "$CONFIG") == 0 ]] && ! (( 8#$(stat -c %a "$CONFIG") & 8#022 )) || die "$CONFIG must be owned by root and writable only by root"
+fi
+# Root-owned, so it may be read as shell. (Keys only; see config.example.env.)
+# shellcheck disable=SC1090
+source "$D$CONFIG"
+grep -q '^PLATFORM_DIR=' "$D$CONFIG" || echo "PLATFORM_DIR=$PREFIX/webroot" >> "$D$CONFIG"
+: "${WEBREPORTS_OWNER:?} ${DATA_DIR:?} ${LISTEN_IP:?}"
 LISTEN_PORT=${LISTEN_PORT:-8080}
 ALLOWED_NETS=${ALLOWED_NETS:-"100.64.0.0/10 fd7a:115c:a1e0::/48"}
 SITE_URL=${SITE_URL:-http://$LISTEN_IP:$LISTEN_PORT}
+HOME_DIR=$(getent passwd "$WEBREPORTS_OWNER" | cut -d: -f6)
 OMB_DATA_DIR=${OMB_DATA_DIR:-$HOME_DIR/.openmausbot}
 NODE_MODULES_DIR=${NODE_MODULES_DIR:-/usr/lib/node_modules}
-NODE=$(command -v node || true)
-OMB_LOOPBACK_TRUST=${OMB_LOOPBACK_TRUST:-}
-[[ $OMB_LOOPBACK_TRUST =~ ^(|owner|service)$ ]] || die "OMB_LOOPBACK_TRUST in config.env must be service, owner or empty"
 OMB_URL=${OMB_URL:-http://127.0.0.1:8799}
-LOOPBACK_DROPIN=/etc/systemd/system/openmausbot.service.d/omb-webreports-loopback.conf
-TOOLS=(webdata-info webdata-ls webdata-sql webdata-check webdata-new-report webdata-job webdata-browse webdata-errors webdata-sync webdata-bake webdata-skills)
+OMB_LOOPBACK_TRUST=${OMB_LOOPBACK_TRUST:-}
+[[ $OMB_LOOPBACK_TRUST =~ ^(|owner|service)$ ]] || die "OMB_LOOPBACK_TRUST in $CONFIG must be service, owner or empty"
+OWNER=$WEBREPORTS_OWNER
 
-# --- preflight ----------------------------------------------------------------
-[[ -n $NODE ]] || die "node not found (Node.js 20+ is required; see docs/setup.md)"
+# --- preflight -------------------------------------------------------------------
 node_major=$("$NODE" -p 'process.versions.node.split(".")[0]')
 (( node_major >= 20 )) || die "Node.js $node_major is too old; 20+ is required"
-[[ -f $NODE_MODULES_DIR/@duckdb/node-api/package.json ]] || die "$NODE_MODULES_DIR/@duckdb/node-api is missing: OpenMausBot's DuckDB native module (docs/setup.md, step 3)"
-[[ -f $NODE_MODULES_DIR/@resvg/resvg-js/package.json ]] || die "$NODE_MODULES_DIR/@resvg/resvg-js is missing: OpenMausBot's chart-image native module (docs/setup.md, step 3)"
-[[ -d $OMB_DATA_DIR ]] || die "OpenMausBot data dir $OMB_DATA_DIR not found (install and start OpenMausBot first)"
-[[ $(stat -c %U "$ROOT") == "$OWNER" ]] || die "$ROOT must be owned by $OWNER"
-systemctl cat openmausbot.service >/dev/null 2>&1 || warn "no openmausbot.service: the site works, but bots won't produce data until OpenMausBot runs"
-ls -d "$HOME_DIR"/.agent-browser/browsers/chrome-*/chrome >/dev/null 2>&1 || warn "no Chrome for agent-browser (openmausbot browser install): webdata-check and webdata-browse won't work"
-# The browser's DuckDB (DUCKDB_WASM_VERSION) should contain the same engine as
-# OpenMausBot's @duckdb/node-api. admin/openmausbot-upgrade.sh keeps them equal;
-# this only warns (as the owner, sharing their lookup cache).
-if (( ! PRINT )); then
-  api=$("$NODE" -p "require('$NODE_MODULES_DIR/@duckdb/node-api/package.json').version")
-  wasm=$(runuser -u "$OWNER" -- "$NODE" --input-type=module -e "console.log((await import('$ROOT/bin/_config.mjs')).DUCKDB_WASM_VERSION)" 2>/dev/null || true)
-  if match=$(timeout 180 runuser -u "$OWNER" -- "$NODE" "$ROOT/admin/duckdb-wasm.mjs" match "$api" 2>/dev/null); then
-    want=$(sed -n 's/^wasm=//p' <<<"$match")
-    [[ $want == "$wasm" ]] || warn "browser DuckDB-WASM $wasm differs from the build matching OpenMausBot's DuckDB ($want for @duckdb/node-api $api): run admin/openmausbot-upgrade.sh (as $OWNER) to align them"
-  else
-    warn "couldn't confirm the browser's DuckDB-WASM $wasm matches OpenMausBot's DuckDB (@duckdb/node-api $api); check with: admin/openmausbot-upgrade.sh --check"
-  fi
+if (( ! TEST )); then
+  id "$OWNER" >/dev/null 2>&1 || die "user $OWNER does not exist"
+  [[ -f $NODE_MODULES_DIR/@duckdb/node-api/package.json ]] || die "$NODE_MODULES_DIR/@duckdb/node-api is missing: OpenMausBot's DuckDB native module (docs/setup.md, step 3)"
+  [[ -f $NODE_MODULES_DIR/@resvg/resvg-js/package.json ]] || die "$NODE_MODULES_DIR/@resvg/resvg-js is missing: OpenMausBot's chart-image native module (docs/setup.md, step 3)"
+  [[ -d $OMB_DATA_DIR ]] || die "OpenMausBot data dir $OMB_DATA_DIR not found (install and start OpenMausBot first)"
+  systemctl cat openmausbot.service >/dev/null 2>&1 || warn "no openmausbot.service: the site works, but bots won't produce data until OpenMausBot runs"
+  ls -d "$HOME_DIR"/.agent-browser/browsers/chrome-*/chrome >/dev/null 2>&1 || warn "no Chrome for agent-browser (openmausbot browser install): webdata-check and webdata-browse won't work"
+fi
+if [[ -e $D$DATA_DIR && $(stat -c %U "$D$DATA_DIR") != "$OWNER" ]] && (( ! TEST )); then
+  die "$DATA_DIR exists but isn't owned by $OWNER"
 fi
 
-# --- generate every file into a staging dir -----------------------------------
+# --- system files, generated into a staging dir ------------------------------------
 STAGE=$(mktemp -d)
 trap 'rm -rf "$STAGE"' EXIT
 put() { mkdir -p "$STAGE$(dirname "$1")"; cat > "$STAGE$1"; }
+
+# One block per served directory: untrusted content, read-only.
+served_dir() {
+  cat <<EOF
+    <Directory $1>
+        # No .htaccess, no symlinks, no CGI/SSI, no content negotiation, no
+        # handlers. Indexes on so the tree can be browsed.
+        Options Indexes
+        AllowOverride None
+        AllowOverrideList None
+        SetHandler None
+        Require all granted
+        # Browsers may keep a copy but must revalidate (ETag -> 304) every time,
+        # except shared files under /lib requested as ?v=<content hash>: a new
+        # version is a new URL, so those are cached for a year.
+        Header set Cache-Control "no-cache"
+        <If "%{REQUEST_URI} =~ m#^/lib/# && %{QUERY_STRING} =~ /^v=[0-9a-f]{12}\$/">
+            Header set Cache-Control "public, max-age=31536000, immutable"
+        </If>
+    </Directory>
+EOF
+}
 
 put /etc/apache2/ports.conf <<EOF
 # Written by omb-webreports admin/install.sh: Apache is dedicated to this site.
@@ -101,30 +218,19 @@ FileETag MTime Size
 EOF
 
 put /etc/apache2/sites-available/webdata.conf <<EOF
-# Written by omb-webreports admin/install.sh from config.env.
+# Written by omb-webreports admin/install.sh from $CONFIG.
 <VirtualHost $LISTEN_IP:$LISTEN_PORT>
-    DocumentRoot $DOCROOT
+    # The shared site files (front page, /lib, the gallery) are part of the
+    # root-owned program; your reports and the published data are in DATA_DIR.
+    # First match wins: the gallery before the rest of /reports.
+    DocumentRoot $PREFIX/webroot
+    Alias /reports/_gallery $PREFIX/webroot/reports/_gallery
+    Alias /reports $DATA_DIR/reports
+    Alias /data $DATA_DIR/data
 
-    <Directory $DOCROOT>
-        # Untrusted content: no .htaccess, no symlinks, no CGI/SSI, no content
-        # negotiation, no handlers. Indexes on so the tree can be browsed.
-        Options Indexes
-        AllowOverride None
-        AllowOverrideList None
-        SetHandler None
-        Require all granted
-
-        # Browsers may keep a copy but must revalidate (ETag -> 304) every
-        # time, so a changed file is picked up.
-        Header set Cache-Control "no-cache"
-        # Except shared files under /lib requested as ?v=<content hash>:
-        # webdata-sync stamps those URLs into pages, and a new version is a new
-        # URL, so they are cached for a year without revalidating. Moving
-        # between reports then fetches no shared code at all.
-        <If "%{REQUEST_URI} =~ m#^/lib/# && %{QUERY_STRING} =~ /^v=[0-9a-f]{12}\$/">
-            Header set Cache-Control "public, max-age=31536000, immutable"
-        </If>
-    </Directory>
+$(served_dir "$PREFIX/webroot")
+$(served_dir "$DATA_DIR/reports")
+$(served_dir "$DATA_DIR/data")
 
     # Read-only, and only from the allowed networks.
     <Location "/">
@@ -133,7 +239,7 @@ put /etc/apache2/sites-available/webdata.conf <<EOF
             Require ip $ALLOWED_NETS
         </RequireAll>
     </Location>
-    # Never serve dotfiles or dot-dirs (.git, .env, .state, ...).
+    # Never serve dotfiles or dot-dirs.
     <LocationMatch "/\.">
         Require all denied
     </LocationMatch>
@@ -176,6 +282,8 @@ Restart=on-failure
 RestartSec=5
 EOF
 
+# Both services run the root-owned program as the owner, and may write only DATA_DIR
+# (jobs also the bots' database folders).
 put /etc/systemd/system/webdata-sync.service <<EOF
 # Written by omb-webreports admin/install.sh.
 [Unit]
@@ -187,7 +295,7 @@ Type=simple
 User=$OWNER
 Group=$OWNER
 Environment=HOME=$HOME_DIR
-ExecStart=$NODE $ROOT/bin/webdata-sync --watch
+ExecStart=$NODE $PREFIX/bin/webdata-sync --watch
 Restart=always
 RestartSec=5
 Nice=10
@@ -196,14 +304,12 @@ PrivateTmp=yes
 ProtectSystem=strict
 # ProtectSystem does not cover /home; without this the whole home dir is writable.
 ProtectHome=read-only
-ReadWritePaths=$ROOT
+ReadWritePaths=$DATA_DIR
 
 [Install]
 WantedBy=multi-user.target
 EOF
 
-# Job scripts inherit this sandbox: they may write the checkout and the bots'
-# database folders, nothing else in home.
 put /etc/systemd/system/webdata-jobs.service <<EOF
 # Written by omb-webreports admin/install.sh.
 [Unit]
@@ -216,7 +322,7 @@ Type=simple
 User=$OWNER
 Group=$OWNER
 Environment=HOME=$HOME_DIR
-ExecStart=$NODE $ROOT/bin/webdata-job daemon
+ExecStart=$NODE $PREFIX/bin/webdata-job daemon
 Restart=always
 RestartSec=5
 Nice=10
@@ -224,22 +330,20 @@ KillMode=mixed
 NoNewPrivileges=yes
 PrivateTmp=yes
 ProtectSystem=strict
-# ProtectSystem does not cover /home; without this the whole home dir is writable.
 ProtectHome=read-only
-ReadWritePaths=$ROOT $OMB_DATA_DIR/bots
+ReadWritePaths=$DATA_DIR $OMB_DATA_DIR/bots
 
 [Install]
 WantedBy=multi-user.target
 EOF
 
-# OpenMausBot isolation (OMB_LOOPBACK_TRUST in config.env). With "service",
-# OpenMausBot ignores requests from this machine that have no login, so bots'
-# shells (which run here) can't administer it through its local API.
-# webdata-skills then signs in with its own session, kept root-only in
-# /etc/omb-webreports, and the timer keeps that session valid.
+# OpenMausBot isolation (OMB_LOOPBACK_TRUST). With "service", OpenMausBot ignores
+# requests from this machine that have no login, so bots' shells can't
+# administer it. webdata-skills signs in with its own session (root-only, in
+# /etc/omb-webreports), which the timer keeps valid, running the root-owned program.
 if [[ -n $OMB_LOOPBACK_TRUST ]]; then
 put "$LOOPBACK_DROPIN" <<EOF
-# Written by omb-webreports admin/install.sh (OMB_LOOPBACK_TRUST in config.env).
+# Written by omb-webreports admin/install.sh (OMB_LOOPBACK_TRUST in $CONFIG).
 [Service]
 Environment=OMB_LOOPBACK_TRUST=$OMB_LOOPBACK_TRUST
 EOF
@@ -253,12 +357,12 @@ After=openmausbot.service network-online.target
 
 [Service]
 Type=oneshot
-ExecStart=$NODE $ROOT/bin/webdata-skills keepalive
+ExecStart=$NODE $PREFIX/bin/webdata-skills keepalive
 NoNewPrivileges=yes
 PrivateTmp=yes
 ProtectSystem=strict
 ProtectHome=read-only
-ReadWritePaths=/etc/omb-webreports
+ReadWritePaths=$CONF_DIR
 EOF
 put /etc/systemd/system/webdata-omb-session.timer <<'EOF'
 # Written by omb-webreports admin/install.sh.
@@ -276,64 +380,141 @@ EOF
 fi
 
 if (( PRINT )); then
-  echo "# omb-webreports install --print: ROOT=$ROOT OWNER=$OWNER LISTEN=$LISTEN_IP:$LISTEN_PORT SITE=$SITE_URL"
+  echo "# omb-webreports install --print: SRC=$SRC PREFIX=$PREFIX DATA_DIR=$DATA_DIR OWNER=$OWNER LISTEN=$LISTEN_IP:$LISTEN_PORT SITE=$SITE_URL"
   (cd "$STAGE" && find . -type f | sort | while read -r f; do echo; echo "======== ${f#.}"; cat "$f"; done)
-  echo; echo "======== also: ACLs for www-data on $DOCROOT and its parent dirs; /usr/local/bin symlinks: ${TOOLS[*]}"
+  echo; echo "======== also: the program copied to $PREFIX; $DATA_DIR for $OWNER (www-data may read reports/ and data/); /usr/local/bin symlinks: ${TOOLS[*]}"
   exit 0
 fi
 
-# --- packages -----------------------------------------------------------------
-apt-get install -y -qq apache2 acl >/dev/null
+# --- packages --------------------------------------------------------------------
+(( TEST )) || apt-get install -y -qq apache2 acl >/dev/null
 
-# --- filesystem access --------------------------------------------------------
-# www-data: traverse-only on each parent directory it can't already pass
-# through (it cannot list or read them), read-only on webroot, incl. new files.
-install -d -o "$OWNER" -g "$OWNER" -m 0755 "$DOCROOT" "$ROOT/jobs"
-dir=$(dirname "$DOCROOT")
-while [[ $dir != / ]]; do
-  runuser -u www-data -- test -x "$dir" || setfacl -m u:www-data:x "$dir"
-  dir=$(dirname "$dir")
+# --- the program: a root-owned copy of just what runs and what agents read --------
+PROGRAM_DIRS=(bin skills templates examples docs webroot/lib webroot/reports/_gallery)
+PROGRAM_FILES=(README.md LICENSE THIRD_PARTY.md READ_FIRST.md DESIGN.md CLAUDE.md AGENTS.md config.example.env
+  webroot/index.html webroot/report.json webroot/icon.svg)
+new=$D$PREFIX.new
+rm -rf "$new"
+for p in "${PROGRAM_DIRS[@]}" "${PROGRAM_FILES[@]}"; do
+  [[ -e $SRC/$p ]] || die "missing in the source: $p"
+  # Only the two known symlinks: a link could point the copy at anything.
+  while IFS= read -r l; do
+    [[ $l == "$SRC/CLAUDE.md" || $l == "$SRC/AGENTS.md" ]] || die "unexpected symlink in the source: $l"
+  done < <(find "$SRC/$p" -type l)
+  mkdir -p "$new/$(dirname "$p")"
+  cp -R -P --no-preserve=ownership "$SRC/$p" "$new/$p"
 done
-setfacl -R -m u:www-data:rX "$DOCROOT"
-setfacl -R -d -m u:www-data:rX "$DOCROOT"
+if (( ! TEST )); then chown -R root:root "$new"; fi
+chmod -R u=rwX,go=rX "$new"
+chmod 0755 "$new"/bin/*
+if [[ -d $D$PREFIX ]]; then rm -rf "$D$PREFIX.old"; mv "$D$PREFIX" "$D$PREFIX.old"; fi
+mkdir -p "$(dirname "$D$PREFIX")"
+mv "$new" "$D$PREFIX"
+rm -rf "$D$PREFIX.old"
+# The shared pages get their versioned module block and the front page its app
+# icons here, as root: they only change when the program does.
+OMB_WEBREPORTS_CONFIG=$D$CONFIG PLATFORM_DIR=$D$PREFIX/webroot "$NODE" "$D$PREFIX/bin/webdata-sync" --platform | sed 's/^/  /'
 
-# --- remove what older versions installed ------------------------------------
-# (the configs/ Apache-override feature was removed)
-if [[ -e /etc/systemd/system/webdata-config.path ]]; then
-  systemctl disable --now -q webdata-config.path webdata-config.service 2>/dev/null || true
-  rm -f /etc/systemd/system/webdata-config.path /etc/systemd/system/webdata-config.service
+# --- DATA_DIR: the owner's; Apache may read only reports/ and data/ -----------------
+mkdir -p "$D$DATA_DIR"
+if (( ! TEST )); then chown "$OWNER:$OWNER" "$D$DATA_DIR"; chmod 0750 "$D$DATA_DIR"; fi
+asowner mkdir -p "$D$DATA_DIR/reports" "$D$DATA_DIR/data" "$D$DATA_DIR/jobs" "$D$DATA_DIR/.state"
+
+if [[ -n $MIGRATE ]]; then
+  echo "migrating content from $MIGRATE (as $OWNER):"
+  for d in "$MIGRATE"/webroot/reports/*/; do
+    slug=$(basename "$d"); [[ $slug == _* || -e $D$DATA_DIR/reports/$slug ]] && continue
+    asowner cp -a "$d" "$D$DATA_DIR/reports/$slug" && echo "  report $slug"
+  done
+  for d in "$MIGRATE"/jobs/*/; do
+    [[ -d $d ]] || continue; name=$(basename "$d"); [[ -e $D$DATA_DIR/jobs/$name ]] && continue
+    asowner cp -a "$d" "$D$DATA_DIR/jobs/$name" && echo "  job $name"
+  done
+  for f in jobs/.notify.env sync.json; do
+    [[ -f $MIGRATE/$f && ! -e $D$DATA_DIR/$f ]] && asowner cp -a "$MIGRATE/$f" "$D$DATA_DIR/$f" && echo "  $f"
+  done
+  [[ -d $MIGRATE/.state/jobs && ! -e $D$DATA_DIR/.state/jobs ]] && asowner cp -a "$MIGRATE/.state/jobs" "$D$DATA_DIR/.state/jobs" && echo "  job history"
 fi
-rm -f /usr/local/sbin/webdata-apply-config /usr/local/bin/new-report
-rm -rf /etc/apache2/webdata /run/webdata
-a2dissite -q reports 2>/dev/null || true
-rm -f /etc/apache2/sites-available/reports.conf
 
-# --- install the generated files ---------------------------------------------
-dropin_before=$(cat "$LOOPBACK_DROPIN" 2>/dev/null || true)
+if (( ! TEST )); then
+  setfacl -m u:www-data:x "$DATA_DIR"
+  dir=$(dirname "$DATA_DIR")
+  while [[ $dir != / ]]; do
+    runuser -u www-data -- test -x "$dir" || setfacl -m u:www-data:x "$dir"
+    dir=$(dirname "$dir")
+  done
+  # As the owner, never following links: these trees are the owner's (and bots') to fill.
+  runuser -u "$OWNER" -- setfacl -R -P -m u:www-data:rX "$DATA_DIR/reports" "$DATA_DIR/data"
+  runuser -u "$OWNER" -- setfacl -R -P -d -m u:www-data:rX "$DATA_DIR/reports" "$DATA_DIR/data"
+  if [[ -n $MIGRATE ]]; then
+    # The old layout let www-data through the folders above the old checkout.
+    dir=$MIGRATE
+    while [[ $dir != / ]]; do
+      [[ $DATA_DIR == "$dir"/* ]] || setfacl -x u:www-data "$dir" 2>/dev/null || true
+      dir=$(dirname "$dir")
+    done
+  fi
+fi
+
+# --- remove what older versions installed -------------------------------------------
+if (( ! TEST )); then
+  if [[ -e /etc/systemd/system/webdata-config.path ]]; then
+    systemctl disable --now -q webdata-config.path webdata-config.service 2>/dev/null || true
+    rm -f /etc/systemd/system/webdata-config.path /etc/systemd/system/webdata-config.service
+  fi
+  rm -f /usr/local/sbin/webdata-apply-config /usr/local/bin/new-report
+  rm -rf /etc/apache2/webdata /run/webdata
+  a2dissite -q reports 2>/dev/null || true
+  rm -f /etc/apache2/sites-available/reports.conf
+fi
+
+# --- install the generated system files ---------------------------------------------
+dropin_before=$(cat "$D$LOOPBACK_DROPIN" 2>/dev/null || true)
 (cd "$STAGE" && find . -type f) | while read -r f; do
-  install -D -m 0644 "$STAGE/${f#./}" "/${f#./}"
+  install -D -m 0644 "$STAGE/${f#./}" "$D/${f#./}"
 done
 
-# --- tools on PATH ------------------------------------------------------------
-for t in "${TOOLS[@]}"; do
-  chmod 0755 "$ROOT/bin/$t"
-  ln -sfn "$ROOT/bin/$t" "/usr/local/bin/$t"
-done
+# --- tools on PATH -------------------------------------------------------------------
+mkdir -p "$D/usr/local/bin"
+for t in "${TOOLS[@]}"; do ln -sfn "$PREFIX/bin/$t" "$D/usr/local/bin/$t"; done
 
-# --- Apache modules and sites --------------------------------------------------
-a2enmod -q headers autoindex filter deflate brotli setenvif
+# --- where this install came from -------------------------------------------------------
+src_owner=$(stat -c %U "$SRC")
+commit="" ref=""
+if [[ -d $SRC/.git ]]; then
+  # Never run git as root in a repository someone else can write (its config can run code).
+  gitas() { if [[ $src_owner == root ]] || (( TEST )); then git -C "$SRC" "$@"; else runuser -u "$src_owner" -- git -C "$SRC" "$@"; fi; }
+  commit=$(gitas rev-parse --verify -q HEAD 2>/dev/null || true)
+  ref=$(gitas describe --tags --exact-match 2>/dev/null || gitas symbolic-ref --short -q HEAD 2>/dev/null || true)
+  [[ -n $commit ]] && [[ -n $(gitas status --porcelain 2>/dev/null) ]] && ref="${ref:+$ref, }with uncommitted changes"
+fi
+SOURCE=$SRC COMMIT=$commit REF=$ref UNSAFE_INSTALL=$UNSAFE SRC_OWNER=$src_owner "$NODE" -e '
+  const e = process.env;
+  process.stdout.write(JSON.stringify({ source: e.SOURCE, commit: e.COMMIT || null, ref: e.REF || null,
+    unsafe: e.UNSAFE_INSTALL === "1", source_owner: e.SRC_OWNER, at: new Date().toISOString() }, null, 2) + "\n");
+' > "$D$CONF_DIR/installed.json"
+chmod 0644 "$D$CONF_DIR/installed.json"
+(( TEST )) || logger -t omb-webreports "installed from $SRC${commit:+ @ $commit}${ref:+ ($ref)}$( (( UNSAFE )) && echo ' UNSAFE development checkout')" 2>/dev/null || true
+
+if (( TEST )); then
+  echo "test install written under $D (nothing outside it was changed)"
+  exit 0
+fi
+
+# --- Apache modules and sites ------------------------------------------------------------
+a2enmod -q headers autoindex filter deflate brotli setenvif alias
 a2dismod -q -f status cgi cgid include negotiation userdir 2>/dev/null || true
 a2dissite -q 000-default default-ssl 2>/dev/null || true
 a2enconf -q zz-reports-hardening
 a2ensite -q webdata
 apache2ctl configtest
 
-# --- services -------------------------------------------------------------------
+# --- services ----------------------------------------------------------------------------
 systemctl daemon-reload
 systemctl enable -q apache2 webdata-sync.service webdata-jobs.service
 systemctl restart apache2 webdata-sync.service webdata-jobs.service
 
-# --- OpenMausBot isolation ------------------------------------------------------
+# --- OpenMausBot isolation ---------------------------------------------------------------
 omb_up() { for _ in $(seq 1 30); do curl -s -o /dev/null --max-time 2 "$OMB_URL/api/health" && return 0; sleep 1; done; return 1; }
 if systemctl cat openmausbot.service >/dev/null 2>&1; then
   [[ -n $OMB_LOOPBACK_TRUST ]] || rm -f "$LOOPBACK_DROPIN"
@@ -343,7 +524,7 @@ if systemctl cat openmausbot.service >/dev/null 2>&1; then
   if [[ $OMB_LOOPBACK_TRUST == service ]]; then
     # webdata-skills' own session first: while OpenMausBot still trusts local
     # requests (before the restart below), it mints the pairing code itself.
-    omb_up && "$NODE" "$ROOT/bin/webdata-skills" login 2>&1 | sed 's/^/  /' \
+    omb_up && "$NODE" "$PREFIX/bin/webdata-skills" login 2>&1 | sed 's/^/  /' \
       || warn "webdata-skills has no OpenMausBot session: create a full-access pairing code in the app (Settings → Remote access), then: sudo webdata-skills login --code <code>"
   fi
   if [[ $dropin_before != "$dropin_after" ]]; then
@@ -364,23 +545,26 @@ if systemctl cat openmausbot.service >/dev/null 2>&1; then
   fi
 fi
 
-# --- bots' skills ---------------------------------------------------------------
-# Bots keep their own copy of each skill: after a git pull, bring the copies
-# (and the Report builder preset) up to date through OpenMausBot's API. As
-# root, so it can use the root-only session when OpenMausBot is isolated; a
-# failure here doesn't fail the install.
+# --- bots' skills ------------------------------------------------------------------------
+# Bots keep their own copy of each skill: bring the copies (and the Report builder
+# preset) up to date. As root, with the root-only session when OpenMausBot is
+# isolated; a failure here doesn't fail the install.
 if systemctl is-active --quiet openmausbot.service; then
   echo
   echo "bots' skills (webdata-skills sync):"
-  "$NODE" "$ROOT/bin/webdata-skills" sync 2>&1 | sed 's/^/  /' \
+  "$NODE" "$PREFIX/bin/webdata-skills" sync 2>&1 | sed 's/^/  /' \
     || warn "couldn't update the bots' skills; run: sudo webdata-skills sync"
 fi
 
 echo
-echo "omb-webreports is installed."
-echo "  serving  $DOCROOT"
+echo "omb-webreports is installed$( (( UNSAFE )) && echo ' (UNSAFE: from a development checkout)')."
+echo "  program  $PREFIX  (from $SRC${commit:+ @ ${commit:0:12}})"
+echo "  content  $DATA_DIR"
 echo "  on       http://$LISTEN_IP:$LISTEN_PORT/  (site URL: $SITE_URL)"
 echo "  check    webdata-info"
+if [[ -n $MIGRATE ]]; then
+  echo "  migrated from $MIGRATE: once the site looks right, delete that folder (its services now run from $PREFIX)"
+fi
 if [[ $SITE_URL == https://*.ts.net:* ]] && ! tailscale serve status 2>/dev/null | grep -q "$LISTEN_IP:$LISTEN_PORT"; then
   echo "  HTTPS    not set up yet: tailscale serve --bg --https=${SITE_URL##*:} http://$LISTEN_IP:$LISTEN_PORT"
 fi

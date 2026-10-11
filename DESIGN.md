@@ -5,7 +5,7 @@ the mechanics (data, kit API, files); this covers the design. Read both before
 building a report.
 
 **See it live:** SITE/reports/_gallery/
-(source: `webroot/reports/_gallery/index.html`). Every component and chart
+(source: `DOCS/webroot/reports/_gallery/index.html`; `webdata-info` prints the path). Every component and chart
 form below is rendered there with the real kit, in light and dark. Each chart
 recipe is one function in the gallery source: **copy it, don't reinvent it.**
 

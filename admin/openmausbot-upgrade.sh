@@ -2,10 +2,10 @@
 # Install or upgrade a self-hosted OpenMausBot and its native modules, and keep
 # the browser's DuckDB on the same version as OpenMausBot's.
 #
-#   admin/openmausbot-upgrade.sh                       # the latest npm release
-#   admin/openmausbot-upgrade.sh 0.1.107               # a specific version (also rolls back)
+#   sudo admin/openmausbot-upgrade.sh                  # the latest npm release
+#   sudo admin/openmausbot-upgrade.sh 0.1.107          # a specific version (also rolls back)
 #   admin/openmausbot-upgrade.sh --check               # show the versions; change nothing
-#   admin/openmausbot-upgrade.sh --skip-browser-check [version]
+#   sudo admin/openmausbot-upgrade.sh --skip-browser-check [version]
 #
 # Native modules: the npm package does not ship them (DuckDB for the data tools
 # and charts, resvg for chart images). Without them OpenMausBot's data features
@@ -19,18 +19,23 @@
 # there is none, it names the newest OpenMausBot release that has one and asks
 # whether to continue anyway; without a terminal to ask on, it stops.
 # --skip-browser-check upgrades regardless. After upgrading, it sets
-# DUCKDB_WASM_VERSION in config.env and restarts webdata-sync/webdata-jobs.
+# DUCKDB_WASM_VERSION in /etc/omb-webreports/config.env, re-stamps the shared
+# pages and restarts webdata-sync/webdata-jobs. (Before omb-webreports is
+# installed there is no config yet; admin/install.sh then picks the build.)
 #
 # Skills: finally runs webdata-skills sync, which updates the bots' copies of
-# the omb-webreports skills and the Report builder preset to this checkout.
+# the omb-webreports skills and the Report builder preset.
 #
-# Run it as the user who owns this checkout; it uses sudo where needed.
-# See docs/setup.md.
+# Run it with sudo from the root-owned clone (like admin/install.sh), or add
+# --from-unsafe-dev from a development checkout. See docs/setup.md.
 set -euo pipefail
 
 ROOT=$(cd "$(dirname "$(readlink -f "$0")")/.." && pwd)
+# shellcheck source=_lib.sh
+source "$ROOT/admin/_lib.sh"
 HELPER=$ROOT/admin/duckdb-wasm.mjs
-CONFIG=$ROOT/config.env
+CONFIG=/etc/omb-webreports/config.env
+PREFIX=/usr/local/lib/omb-webreports
 REPO=milind-soni/OpenMausBot
 SERVICE=openmausbot
 MODULES_DIR=/usr/lib/node_modules
@@ -38,11 +43,12 @@ NATIVE_MODULES=(@duckdb/node-api @resvg/resvg-js)
 
 usage() { sed -n '2,/^set -euo/p' "$0" | sed -e '/^set -euo/d' -e 's/^# \{0,1\}//'; }
 
-skip_check=0 check_only=0 target=""
+skip_check=0 check_only=0 unsafe=0 target=""
 for arg in "$@"; do
   case $arg in
     --skip-browser-check) skip_check=1 ;;
     --check) check_only=1 ;;
+    --from-unsafe-dev) unsafe=1 ;;
     -h|--help) usage; exit 0 ;;
     -*) echo "unknown option: $arg (see --help)" >&2; exit 2 ;;
     *) target=$arg ;;
@@ -52,6 +58,10 @@ done
 if [[ ! -f $HELPER ]]; then
   echo "error: run this from an omb-webreports checkout ($HELPER is missing)" >&2
   exit 2
+fi
+if (( ! check_only )); then
+  (( EUID == 0 )) || die "run as root: sudo $0 (it installs global npm modules and writes $CONFIG)"
+  check_source "$ROOT" "$unsafe"
 fi
 
 kv() { sed -n "s/^$1=//p" | head -1; }                 # kv <key> <<< "key=value lines"
@@ -74,7 +84,7 @@ if (( check_only )); then
   if [[ -n $browser_engine && $server_engine == "$browser_engine" ]]; then
     echo "match:        yes"
   else
-    echo "match:        NO; run admin/openmausbot-upgrade.sh $current to fix the browser side"
+    echo "match:        NO; run: sudo admin/openmausbot-upgrade.sh $current"
     status=1
   fi
   if latest=$(node "$HELPER" omb-match); then
@@ -120,7 +130,7 @@ else
     echo "Can't keep the browser's DuckDB equal to openmausbot $target: $reason." >&2
     if latest=$(node "$HELPER" omb-match "$target"); then
       echo "Newest openmausbot release with a matching browser build: $(kv omb <<<"$latest") (DuckDB $(kv engine <<<"$latest"), DuckDB-WASM $(kv wasm <<<"$latest"))." >&2
-      echo "  To install that instead: admin/openmausbot-upgrade.sh $(kv omb <<<"$latest")" >&2
+      echo "  To install that instead: sudo admin/openmausbot-upgrade.sh $(kv omb <<<"$latest")" >&2
     else
       echo "No openmausbot release up to $target has a matching browser build." >&2
     fi
@@ -130,7 +140,7 @@ else
       if [[ ! $answer =~ ^[Yy] ]]; then echo "Nothing changed."; exit 1; fi
     else
       echo "error: not an interactive terminal, so not asking. Nothing changed." >&2
-      echo "  To upgrade anyway: admin/openmausbot-upgrade.sh --skip-browser-check $target" >&2
+      echo "  To upgrade anyway: sudo admin/openmausbot-upgrade.sh --skip-browser-check $target" >&2
       exit 1
     fi
   fi
@@ -142,7 +152,7 @@ changed=0
 if [[ $current == "$target" ]]; then
   echo "openmausbot $target already installed"
 else
-  sudo npm install -g "openmausbot@$target"
+  npm install -g "openmausbot@$target"
   changed=1
 fi
 
@@ -158,7 +168,7 @@ for mod in "${NATIVE_MODULES[@]}"; do
     echo "$mod $want already installed"
   else
     echo "$mod: installed $have, target $want"
-    sudo npm install -g "$mod@$want"
+    npm install -g "$mod@$want"
     changed=1
   fi
 done
@@ -167,22 +177,21 @@ done
 DROPIN=/etc/systemd/system/$SERVICE.service.d/duckdb.conf
 if [[ ! -f $DROPIN ]]; then
   echo "adding $DROPIN (OMB_DUCKDB_DIR=/usr/lib)"
-  sudo mkdir -p "$(dirname "$DROPIN")"
-  printf '[Service]\nEnvironment=OMB_DUCKDB_DIR=/usr/lib\n' | sudo tee "$DROPIN" >/dev/null
-  sudo systemctl daemon-reload
+  mkdir -p "$(dirname "$DROPIN")"
+  printf '[Service]\nEnvironment=OMB_DUCKDB_DIR=/usr/lib\n' > "$DROPIN"
+  systemctl daemon-reload
 fi
 
 # ---------------------------------------------------------------- browser DuckDB pin
 
 # Always written explicitly, so a later change to the default in bin/_config.mjs
 # (git pull) can't move the browser away from this machine's OpenMausBot.
-if [[ -n $new_wasm ]]; then
+pin_changed=0
+if [[ -n $new_wasm && ! -f $CONFIG ]]; then
+  echo "browser: omb-webreports isn't installed yet; admin/install.sh will use DuckDB-WASM $new_wasm"
+elif [[ -n $new_wasm ]]; then
   [[ $new_wasm =~ ^[0-9A-Za-z.+-]+$ ]] || { echo "error: unexpected DuckDB-WASM version '$new_wasm'" >&2; exit 1; }
-  if [[ ! -f $CONFIG ]]; then
-    cp "$ROOT/config.example.env" "$CONFIG"
-    chmod 600 "$CONFIG"
-    echo "created config.env from config.example.env (review its other settings: docs/setup.md, step 6)"
-  fi
+  before_pin=$(grep '^DUCKDB_WASM_VERSION=' "$CONFIG" || true)
   if grep -q '^DUCKDB_WASM_VERSION=' "$CONFIG"; then
     if ! grep -qx "DUCKDB_WASM_VERSION=$new_wasm" "$CONFIG"; then
       sed -i "s/^DUCKDB_WASM_VERSION=.*/DUCKDB_WASM_VERSION=$new_wasm/" "$CONFIG"
@@ -192,7 +201,13 @@ if [[ -n $new_wasm ]]; then
     printf '\n# Set by admin/openmausbot-upgrade.sh: the DuckDB-WASM build with the same DuckDB as OpenMausBot.\nDUCKDB_WASM_VERSION=%s\n' "$new_wasm" >> "$CONFIG"
     changed=1
   fi
-  echo "browser: DUCKDB_WASM_VERSION=$new_wasm in config.env"
+  echo "browser: DUCKDB_WASM_VERSION=$new_wasm in $CONFIG"
+  [[ $before_pin == "DUCKDB_WASM_VERSION=$new_wasm" ]] || pin_changed=1
+fi
+# The shared pages (front page, gallery, template) carry the browser build in
+# their import maps; they're root-owned, so they're re-stamped here.
+if (( pin_changed )) && [[ -x $PREFIX/bin/webdata-sync ]]; then
+  node "$PREFIX/bin/webdata-sync" --platform | sed 's/^/  /'
 fi
 
 # webdata-sync and webdata-jobs load @duckdb/node-api when they start, and sync
@@ -202,7 +217,7 @@ if (( changed )); then
   for u in webdata-sync webdata-jobs; do systemctl cat "$u.service" >/dev/null 2>&1 && units+=("$u"); done
   if (( ${#units[@]} )); then
     echo "restarting ${units[*]}"
-    sudo systemctl restart "${units[@]}"
+    systemctl restart "${units[@]}"
   fi
 fi
 
@@ -214,7 +229,7 @@ if ! systemctl cat "$SERVICE.service" >/dev/null 2>&1; then
   exit 0
 fi
 
-sudo systemctl restart "$SERVICE"
+systemctl restart "$SERVICE"
 sleep 3
 systemctl is-active --quiet "$SERVICE" || {
   echo "error: $SERVICE did not stay up; recent logs:" >&2
@@ -225,8 +240,10 @@ echo "$SERVICE is running openmausbot $target"
 journalctl -u "$SERVICE" -n 5 --no-pager
 
 # Bots keep their own copy of each omb-webreports skill; bring them (and the
-# Report builder preset) up to date with this checkout.
-echo
-echo "bots' skills (webdata-skills sync):"
-# As root: when OpenMausBot is isolated, sync uses a root-only session.
-sudo "$ROOT/bin/webdata-skills" sync 2>&1 | sed 's/^/  /' || echo "warning: couldn't update the bots' skills; run: sudo webdata-skills sync" >&2
+# Report builder preset) up to date. The installed program, as root: when
+# OpenMausBot is isolated, sync uses a root-only session.
+if [[ -x $PREFIX/bin/webdata-skills ]]; then
+  echo
+  echo "bots' skills (webdata-skills sync):"
+  "$PREFIX/bin/webdata-skills" sync 2>&1 | sed 's/^/  /' || echo "warning: couldn't update the bots' skills; run: sudo webdata-skills sync" >&2
+fi

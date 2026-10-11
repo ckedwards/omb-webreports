@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 // webdata-job: scheduled scripts that refresh bots' DuckDB tables.
 //
-// A job is ROOT/jobs/<name>/ with:
+// A job is <data>/jobs/<name>/ (JOBS in webdata-info) with:
 //   job.json   bot, cron schedule + timezone, tables to write, enabled flag
 //   run.py | run.mjs | run.sh | run   the script (any one; or "command" in job.json)
 //   .env       optional KEY=value secrets for the script (chmod 600)
@@ -43,11 +43,12 @@ import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 
-import { ROOT, OMB_DATA_DIR, NODE_MODULES_DIR } from './_config.mjs';
+import { DATA_DIR, JOBS_DIR, STATE_DIR, PUBLISHED_DIR, OMB_DATA_DIR, NODE_MODULES_DIR } from './_config.mjs';
 // Overridable so tests never share a folder with the live webdata-jobs service.
-const JOBS = process.env.WEBDATA_JOBS_DIR || path.join(ROOT, 'jobs');
-const STATE = process.env.WEBDATA_JOBS_STATE || path.join(ROOT, '.state', 'jobs');
-const CATALOG = path.join(ROOT, 'webroot', 'data', 'catalog.json');
+const JOBS = process.env.WEBDATA_JOBS_DIR || JOBS_DIR;
+const STATE = process.env.WEBDATA_JOBS_STATE || path.join(STATE_DIR, 'jobs');
+const CATALOG = path.join(PUBLISHED_DIR, 'catalog.json');
+const rel = (p) => path.relative(DATA_DIR, p);
 const OMB = OMB_DATA_DIR;
 // The exact binding OpenMausBot uses, so the file format never drifts.
 const DUCKDB = path.join(NODE_MODULES_DIR, '@duckdb', 'node-api', 'lib', 'index.js');
@@ -166,7 +167,7 @@ function resolveBot(nameOrId) {
   return {
     id: bot.id, name: bot.name,
     db: path.join(OMB, 'bots', bot.id, 'data.duckdb'),
-    snapshot: snapshot ? path.join(ROOT, 'webroot', snapshot.url) : null,
+    snapshot: snapshot ? path.join(PUBLISHED_DIR, path.basename(snapshot.url)) : null,
     snapshotName: snapshot?.name ?? null,
   };
 }
@@ -176,7 +177,7 @@ function loadJob(name) {
   if (!NAME.test(name)) throw new Error(`job name "${name}" must be lowercase-kebab-case`);
   const dir = path.join(JOBS, name);
   const file = path.join(dir, 'job.json');
-  if (!fs.existsSync(file)) throw new Error(`no ${path.relative(ROOT, file)}`);
+  if (!fs.existsSync(file)) throw new Error(`no ${rel(file)}`);
   let raw;
   try { raw = JSON.parse(fs.readFileSync(file, 'utf8')); } catch (e) { throw new Error(`jobs/${name}/job.json: ${e.message}`); }
   const problems = [];
@@ -343,7 +344,7 @@ async function runJob(job, { dryRun = false, trigger = 'manual', echo = false } 
     }
 
     if (dryRun) {
-      log(`dry run OK: staged output is in ${path.relative(ROOT, out)}/ and ${path.relative(ROOT, stageFile)}; nothing written`);
+      log(`dry run OK: staged output is in ${rel(out)}/ and ${rel(stageFile)}; nothing written`);
       result = { ok: true, dry: true, tables: summary };
       return result;
     }
@@ -398,7 +399,7 @@ async function runJob(job, { dryRun = false, trigger = 'manual', echo = false } 
     log(`# done in ${seconds}s: ${result.ok ? 'ok' : 'failed'}`);
     if (!result.dry) {
       Object.assign(status, { running: false, last_finished: stamp(), last_ok: result.ok, last_error: result.error ?? null,
-        last_duration_s: seconds, last_log: path.relative(ROOT, logFile) });
+        last_duration_s: seconds, last_log: rel(logFile) });
       if (result.ok) {
         status.last_success = status.last_finished;
         status.last_rows = Object.fromEntries(Object.entries(result.tables).map(([t, s]) => [t, s.rows_after ?? s.rows]));
@@ -426,7 +427,7 @@ async function runJob(job, { dryRun = false, trigger = 'manual', echo = false } 
 function webhookFor(botName) {
   if (!fs.existsSync(NOTIFY_FILE)) return null;
   const mode = fs.statSync(NOTIFY_FILE).mode & 0o077;
-  if (mode) console.error(`warning: ${path.relative(ROOT, NOTIFY_FILE)} is readable by others; chmod 600 it`);
+  if (mode) console.error(`warning: ${rel(NOTIFY_FILE)} is readable by others; chmod 600 it`);
   const map = dotenv(NOTIFY_FILE);
   const key = Object.keys(map).find((k) => k.toLowerCase() === String(botName).toLowerCase()) ?? (map['*'] ? '*' : null);
   return key ? map[key] : null;
@@ -448,7 +449,7 @@ async function maybeNotify(job, status, logFile, log) {
   const due = !status.notified_at || Date.now() - Date.parse(status.notified_at) > RENOTIFY_MS;
   if (!due) { log(`notify: already sent ${ago(status.notified_at)}; next reminder after 24h`); return; }
   const url = webhookFor(job.bot.name);
-  if (!url) { log(`notify: no webhook for ${job.bot.name} in ${path.relative(ROOT, NOTIFY_FILE)}; not notified`); return; }
+  if (!url) { log(`notify: no webhook for ${job.bot.name} in ${rel(NOTIFY_FILE)}; not notified`); return; }
   const tail = fs.readFileSync(logFile, 'utf8').split('\n').slice(-80).join('\n').slice(-16_000);
   const payload = {
     event: 'webdata.job.failed',
@@ -607,7 +608,7 @@ const commands = {
   async 'notify-test'([botName]) {
     const bot = resolveBot(botName);
     const url = webhookFor(bot.name);
-    if (!url) throw new Error(`no webhook for ${bot.name} in ${path.relative(ROOT, NOTIFY_FILE)} (line: ${bot.name}=<webhook URL>)`);
+    if (!url) throw new Error(`no webhook for ${bot.name} in ${rel(NOTIFY_FILE)} (line: ${bot.name}=<webhook URL>)`);
     const reply = await postWebhook(url, {
       event: 'webdata.job.test', bot: bot.name, sent_at: stamp(),
       note: 'Test from webdata-job notify-test. No job failed; reply that the notification arrived and do nothing else.',

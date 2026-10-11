@@ -15,10 +15,10 @@ update themselves.
 ## Anatomy of a job
 
 ```
-jobs/<name>/
+JOBS/<name>/           (JOBS: /var/lib/omb-webreports/jobs; webdata-info --jobs)
   job.json    what, when, where to
   run.py      the script (or run.mjs / run.sh / an executable "run")
-  .env        optional secrets, KEY=value, chmod 600 (git-ignored)
+  .env        optional secrets, KEY=value, chmod 600
 ```
 
 ```json
@@ -62,7 +62,7 @@ The script writes one file per declared table into `$WEBDATA_OUT`
 
 Any failure at any step writes nothing; the previous data stays.
 
-Jobs run inside the `webdata-jobs` sandbox: only the checkout, OpenMausBot's
+Jobs run inside the `webdata-jobs` sandbox: only the content folder (`/var/lib/omb-webreports`), OpenMausBot's
 `bots/` folder and a private `/tmp` are writable. Scripts use the Python
 standard library or Node built-ins (no package installs). For pages that need
 JavaScript to render, scripts call `webdata-browse`, which runs headless Chrome
@@ -115,8 +115,8 @@ usual.
 2. Register its URL (it contains the secret) for that bot:
 
    ```bash
-   echo 'MyBot=http://127.0.0.1:8800/hooks/wh_…/whsec_…' >> ~/omb-webreports/jobs/.notify.env
-   chmod 600 ~/omb-webreports/jobs/.notify.env
+   echo 'MyBot=http://127.0.0.1:8800/hooks/wh_…/whsec_…' >> /var/lib/omb-webreports/jobs/.notify.env
+   chmod 600 /var/lib/omb-webreports/jobs/.notify.env
    ```
 
    One line per bot; `*=<url>` is a fallback for all bots. OpenMausBot's webhook

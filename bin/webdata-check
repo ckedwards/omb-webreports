@@ -12,11 +12,15 @@
 set -uo pipefail
 
 ROOT=$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/.." && pwd)
-SITE=$(node --input-type=module -e "import('$ROOT/bin/_config.mjs').then((c) => console.log(c.SITE_URL))")
+while IFS='=' read -r k v; do
+  case $k in REPORTS_DIR) REPORTS=$v ;; PUBLISHED_DIR) PUBLISHED=$v ;; PLATFORM_DIR) PLATFORM=$v ;; SITE_URL) SITE=$v ;; esac
+done < <(node "$ROOT/bin/_config.mjs")
 slug=${1:-}; out=${2:-}
 [[ -n $slug ]] || { sed -n '2,11p' "$0" | sed 's/^# \{0,1\}//'; exit 2; }
 slug=${slug#/}; slug=${slug#reports/}; slug=${slug%/}
-[[ -d $ROOT/webroot/reports/$slug ]] || { echo "no report dir webroot/reports/$slug"; exit 2; }
+# Reports live in REPORTS; the design gallery is part of the shared (platform) files.
+dir=$REPORTS/$slug; [[ $slug == _gallery ]] && dir=$PLATFORM/reports/_gallery
+[[ -d $dir ]] || { echo "no report $slug (looked in $dir)"; exit 2; }
 [[ -n $out ]] || out=$(mktemp -d "${TMPDIR:-/tmp}/webdata-check-$slug.XXXX")
 mkdir -p "$out"
 
@@ -29,7 +33,7 @@ trap 'ab close >/dev/null 2>&1' EXIT
 problems=0
 echo "== sync"
 "$ROOT/bin/webdata-sync" --once | sed 's/^/  /' || problems=1
-if [[ $slug != _* ]] && node -e 'process.exit((JSON.parse(require("fs").readFileSync(process.argv[1], "utf8")).databases || []).length ? 0 : 1)' "$ROOT/webroot/reports/$slug/report.json" 2>/dev/null; then
+if [[ $slug != _* ]] && node -e 'process.exit((JSON.parse(require("fs").readFileSync(process.argv[1], "utf8")).databases || []).length ? 0 : 1)' "$dir/report.json" 2>/dev/null; then
   echo "== bake (first render, for fast first visits)"
   "$ROOT/bin/webdata-bake" "$slug" 2>&1 | grep -v '^The page links it' | sed 's/^/  /' || problems=1
   "$ROOT/bin/webdata-sync" --once >/dev/null 2>&1   # links the bake from the page

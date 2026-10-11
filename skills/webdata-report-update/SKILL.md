@@ -6,11 +6,14 @@ tags: reports, webdata, duckdb, charts
 
 # Update a report on the omb-webreports site
 
-**First run `webdata-info`.** It prints `ROOT` (the install directory) and
-`SITE` (the site's URL); below, `ROOT/...` and `SITE/...` mean those. The
-`webdata-*` commands are on `PATH`.
+**First run `webdata-info`.** It prints `SITE` (the site's URL), `REPORTS`
+(where reports live), `JOBS` (scheduled data jobs), `DATA` (the published
+databases and `catalog.json`) and `DOCS` (read-only: READ_FIRST.md, DESIGN.md,
+examples); below, `REPORTS/...`, `SITE/...` and so on mean those. The
+`webdata-*` commands are on `PATH`. The shared code and docs are root-owned:
+you can read them, not change them.
 
-Reports live in `ROOT/webroot/reports/<slug>/` and are live as soon as a
+Reports live in `REPORTS/<slug>/` and are live as soon as a
 file is saved. Open copies (including home-screen apps) reload themselves
 within ~20 seconds when `index.html` changes, so every save is visible to
 people right away. Work carefully and verify before you finish.
@@ -23,10 +26,10 @@ webdata-check <slug>     # baseline: current problems + screenshots
 ```
 
 Read `report.json` and **all** of `index.html` before changing anything.
-Read `ROOT/READ_FIRST.md` ("Rules for reports", "kit.js API") and
-`ROOT/DESIGN.md` unless you already have them in context. For a new chart
+Read `DOCS/READ_FIRST.md` ("Rules for reports", "kit.js API") and
+`DOCS/DESIGN.md` unless you already have them in context. For a new chart
 or component, start from its function in
-`ROOT/webroot/reports/_gallery/index.html`.
+`DOCS/webroot/reports/_gallery/index.html`.
 
 Note what the baseline check printed, so you can tell your problems from
 pre-existing ones. If the person says it's broken on their phone, also run
@@ -81,11 +84,10 @@ that URL. Prefer changing `title`/`short_name` in `report.json` over renaming.
   home-screen icon for it will stop working. `rm -r` the one directory, then
   `webdata-sync --once`.
 
-Never touch other reports, `webroot/lib/`, `webroot/data/` or
-`ROOT/admin/`. `lib/kit.js` and `lib/kit.css` are shared by every
-report: change them only when the person explicitly asks, then run
-`webdata-check` on **every** report (`webdata-ls reports`) and on `_gallery`,
-and update DESIGN.md if the change affects it.
+Never touch other reports or `DATA/` (generated). `lib/kit.js`, `lib/kit.css`,
+the gallery and the docs are part of the root-owned install: if the person
+wants them changed, that's a change to omb-webreports itself (its repository),
+not something to edit here.
 
 ## 4. Report back
 

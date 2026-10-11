@@ -6,25 +6,28 @@ tags: reports, webdata, duckdb, charts
 
 # Create a report on the omb-webreports site
 
-**First run `webdata-info`.** It prints `ROOT` (the install directory) and
-`SITE` (the site's URL); below, `ROOT/...` and `SITE/...` mean those. The
-`webdata-*` commands are on `PATH`.
+**First run `webdata-info`.** It prints `SITE` (the site's URL), `REPORTS`
+(where reports live), `JOBS` (scheduled data jobs), `DATA` (the published
+databases and `catalog.json`) and `DOCS` (read-only: READ_FIRST.md, DESIGN.md,
+examples); below, `REPORTS/...`, `SITE/...` and so on mean those. The
+`webdata-*` commands are on `PATH`. The shared code and docs are root-owned:
+you can read them, not change them.
 
-A report is one directory, `ROOT/webroot/reports/<slug>/`, served at
+A report is one directory, `REPORTS/<slug>/`, served at
 `SITE/reports/<slug>/`. It queries the bots'
 published DuckDB snapshots in the browser and updates itself when the data
 changes. There is no build step and nothing to deploy: files on disk are live.
 
 ## 1. Learn the system first
 
-Read `ROOT/READ_FIRST.md` (mechanics, `kit.js` API) and
-`ROOT/DESIGN.md` (layout, tokens, components, chart forms, words and
+Read `DOCS/READ_FIRST.md` (mechanics, `kit.js` API) and
+`DOCS/DESIGN.md` (layout, tokens, components, chart forms, words and
 numbers) completely; neither is repeated here. Then open the references:
-- `ROOT/webroot/reports/_gallery/index.html`: every component and chart
+- `DOCS/webroot/reports/_gallery/index.html`: every component and chart
   form as one function each (`trend`, `compare`, `ranking`, `columns`,
   `stacked`, `diverging`, `heatmap`, `scatter`, `multiples`; for briefings
   `conditions`, `headlines`, `forecastChart`, `recentResults`). Copy from it.
-- `ROOT/examples/reports/blue-jays-2026/index.html`: a complete real report.
+- `DOCS/examples/reports/blue-jays-2026/index.html`: a complete real report.
 
 ## 2. Pick the shape
 
@@ -96,7 +99,7 @@ because renaming later breaks home-screen installs. This writes `index.html`
 
 ## 6. Write the page
 
-Edit `webroot/reports/<slug>/index.html`:
+Edit `REPORTS/<slug>/index.html`:
 - Keep the whole `<head>` from the template (error reporter, home-screen meta
   tags, kit.css, the `<!-- webdata:modules -->` block, preconnect, `defer`
   scripts) and the `.app-header` with the back link and `<div data-kit-status>`.
@@ -135,8 +138,9 @@ Optionally replace `icon.svg` (DESIGN.md §8): 512×512 viewBox, full-bleed
 square in the theme color, one bold glyph, no transparency, no rounded corners.
 PNG icons and the manifest are generated for you.
 
-Don't touch `webroot/lib/`, `webroot/data/`, other reports, generated files
-(`manifest.webmanifest`, `icon-*.png`, `initial.json`, `index.json`) or `ROOT/admin/`.
+Don't touch `DATA/`, other reports or generated files (`manifest.webmanifest`,
+`icon-*.png`, `initial.json`, `index.json`). The shared code and docs are
+read-only.
 
 ## 7. Verify, then look
 

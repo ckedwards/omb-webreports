@@ -6,14 +6,16 @@ tags: reports, webdata, duckdb
 
 # Read reports on the omb-webreports site
 
-**First run `webdata-info`.** It prints `ROOT` (the install directory) and
-`SITE` (the site's URL); below, `ROOT/...` and `SITE/...` mean those. The
-`webdata-*` commands are on `PATH`.
+**First run `webdata-info`.** It prints `SITE` (the site's URL), `REPORTS`
+(where reports live), `JOBS` (scheduled data jobs), `DATA` (the published
+databases and `catalog.json`) and `DOCS` (read-only: READ_FIRST.md, DESIGN.md,
+examples); below, `REPORTS/...`, `SITE/...` and so on mean those. The
+`webdata-*` commands are on `PATH`. The shared code and docs are root-owned:
+you can read them, not change them.
 
-The reports site is static files in `ROOT/webroot/`, served at
-**SITE/** (Tailscale only). Each report is a
-directory `webroot/reports/<slug>/` and a page at `/reports/<slug>/`. Reports
-read DuckDB snapshots of each bot's data in `webroot/data/<bot>.duckdb`, which
+The reports site is static files, served at **SITE/** (Tailscale only). Each report is a
+directory `REPORTS/<slug>/` and a page at `/reports/<slug>/`. Reports
+read DuckDB snapshots of each bot's data in `DATA/<bot>.duckdb`, which
 a sync service refreshes within seconds of the bot's data changing.
 
 This skill only reads. Never edit, move or delete anything here; for changes
@@ -33,8 +35,8 @@ as an app.
 
 ## What a report shows
 
-1. `cat ROOT/webroot/reports/<slug>/report.json` for title, description and databases.
-2. Read `ROOT/webroot/reports/<slug>/index.html`. The content is built in
+1. `cat REPORTS/<slug>/report.json` for title, description and databases.
+2. Read `REPORTS/<slug>/index.html`. The content is built in
    the `render(db)` function: each `db.query(...)` is the SQL behind a section,
    and the `chart(...)` / `table(...)` / stat calls show how it is presented.
 3. To see it as a person would: `webdata-check <slug>` renders it at
@@ -67,8 +69,8 @@ bot's cached card results; ignore it.
 
 ## Reference
 
-`ROOT/READ_FIRST.md` explains the whole system (data flow, report
-format, kit API, rules) and `ROOT/DESIGN.md` the design system; the
+`DOCS/READ_FIRST.md` explains the whole system (data flow, report
+format, kit API, rules) and `DOCS/DESIGN.md` the design system; the
 live component/chart gallery is at
 SITE/reports/_gallery/. Read them when a
 question goes beyond listing and describing reports.

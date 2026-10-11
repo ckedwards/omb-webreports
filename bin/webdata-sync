@@ -1,19 +1,23 @@
 #!/usr/bin/env node
-// webdata-sync: keeps ROOT/webroot in step with its sources.
+// webdata-sync: keeps the published data and your reports (DATA_DIR) in step
+// with their sources.
 //
-//   - snapshots each OpenMausBot bot's data.duckdb to webroot/data/<bot>.duckdb
+//   - snapshots each OpenMausBot bot's data.duckdb to <data>/data/<bot>.duckdb
 //     (consistent copy, WAL folded in, compact format DuckDB-WASM can read)
-//   - writes webroot/data/catalog.json: every database in webroot/data, its
-//     tables, columns and row counts
-//   - for the front page and each report dir: renders icon.svg to PNGs and
-//     writes manifest.webmanifest from report.json
-//   - writes webroot/reports/index.json for the front page
-//   - stamps each page's webdata:modules block (versioned module URLs, and a
-//     preload of the report's baked first render if there is one)
+//   - writes <data>/data/catalog.json: every published database, its tables,
+//     columns and row counts
+//   - for each report dir: renders icon.svg to PNGs and writes
+//     manifest.webmanifest from report.json
+//   - writes <data>/reports/index.json for the front page
+//   - stamps each report page's webdata:modules block (versioned module URLs,
+//     and a preload of the report's baked first render if there is one)
 //   - --watch: runs webdata-bake when a report's page or data changed
 //
 // Usage: webdata-sync [--once]   one pass, print warnings, exit 2 if any
 //        webdata-sync --watch    poll for changes forever (webdata-sync.service)
+//        webdata-sync --platform the root-owned shared pages (front page,
+//                                gallery, template) and the front page's app
+//                                icons; admin/install.sh runs this as root
 //
 // Generated files are only rewritten when their content changes, so their
 // mtime/ETag only moves when something real changed.
@@ -25,12 +29,11 @@ import { createRequire } from 'node:module';
 import path from 'node:path';
 import { pathToFileURL } from 'node:url';
 
-import { ROOT, OMB_DATA_DIR, NODE_MODULES_DIR, DUCKDB_WASM_VERSION } from './_config.mjs';
+import { ROOT, OMB_DATA_DIR, NODE_MODULES_DIR, DUCKDB_WASM_VERSION, DATA_DIR, PLATFORM_DIR, PUBLISHED_DIR, REPORTS_DIR, STATE_DIR, SYNC_JSON } from './_config.mjs';
 import { BAKE_FILE, bakeConfig, dueTargets } from './_bake.mjs';
-const WEB = path.join(ROOT, 'webroot');
-const DATA = path.join(WEB, 'data');
-const REPORTS = path.join(WEB, 'reports');
-const STATE_DIR = path.join(ROOT, '.state');
+const PLATFORM = PLATFORM_DIR;
+const DATA = PUBLISHED_DIR;
+const REPORTS = REPORTS_DIR;
 const STATE_FILE = path.join(STATE_DIR, 'sync-state.json');
 const LOCK = path.join(STATE_DIR, 'lock');
 const OMB = OMB_DATA_DIR;
@@ -47,7 +50,7 @@ const GENERATED = new Set(['manifest.webmanifest', 'icon-180.png', 'icon-512.png
 const config = {
   exclude_bots: [],   // bot names or ids not to publish
   poll_seconds: 3,
-  ...readJSON(path.join(ROOT, 'sync.json'), {}),
+  ...readJSON(SYNC_JSON, {}),
 };
 
 const log = (...a) => console.log(new Date().toISOString(), ...a);
@@ -333,10 +336,6 @@ function buildReports(catalog) {
   }
   reports.sort((a, b) => (b.data_updated || b.updated).localeCompare(a.data_updated || a.updated));
   writeIfChanged(path.join(REPORTS, 'index.json'), json({ reports }));
-
-  const home = readJSON(path.join(WEB, 'report.json'), { title: 'Reports' });
-  home.theme_color ||= '#2a78d6';
-  buildApp(WEB, home, '/');
   return reports;
 }
 
@@ -366,7 +365,7 @@ const BLOCK = /<!-- webdata:modules[^>]*-->[\s\S]*?<!-- \/webdata:modules -->/;
 function moduleImports() {
   const imports = {};
   for (const m of MODULES) {
-    imports[`/lib/${m}`] = `/lib/${m}?v=${hash(fs.readFileSync(path.join(WEB, 'lib', m)))}`;
+    imports[`/lib/${m}`] = `/lib/${m}?v=${hash(fs.readFileSync(path.join(PLATFORM, 'lib', m)))}`;
   }
   return imports;
 }
@@ -395,7 +394,7 @@ function versionLibRefs(html, hashes) {
     if (MODULES.includes(file) || file.includes('..')) return all;   // modules: the import map's job
     if (!hashes.has(file)) {
       let h = null;
-      try { h = hash(fs.readFileSync(path.join(WEB, 'lib', file))); } catch {}
+      try { h = hash(fs.readFileSync(path.join(PLATFORM, 'lib', file))); } catch {}
       hashes.set(file, h);
     }
     const h = hashes.get(file);
@@ -403,14 +402,19 @@ function versionLibRefs(html, hashes) {
   });
 }
 
-function stampPages() {
+/** The report pages in DATA_DIR (the shared pages are stamped by --platform). */
+const reportPages = () => fs.readdirSync(REPORTS, { withFileTypes: true })
+  .filter((e) => e.isDirectory() && !e.name.startsWith('.')).map((e) => path.join(REPORTS, e.name, 'index.html'));
+/** The root-owned shared pages: front page, gallery, the report template. */
+const platformPages = () => [path.join(PLATFORM, 'index.html'), path.join(PLATFORM, 'reports', '_gallery', 'index.html'),
+  path.join(ROOT, 'templates', 'report', 'index.html')];
+const shortPath = (p) => [[REPORTS, 'reports'], [PLATFORM, 'platform'], [ROOT, 'install']]
+  .reduce((acc, [base, name]) => (acc === p && p.startsWith(base + path.sep) ? `${name}/${path.relative(base, p)}` : acc), p);
+
+function stampPages(pages = reportPages()) {
   const imports = moduleImports();
   const hashes = new Map();
   const bake = bakeConfig().enabled;
-  const pages = [path.join(WEB, 'index.html'), path.join(ROOT, 'templates', 'report', 'index.html')];
-  for (const e of fs.readdirSync(REPORTS, { withFileTypes: true })) {
-    if (e.isDirectory() && !e.name.startsWith('.')) pages.push(path.join(REPORTS, e.name, 'index.html'));
-  }
   for (const page of pages) {
     let html;
     try { html = fs.readFileSync(page, 'utf8'); } catch { continue; }
@@ -420,14 +424,23 @@ function stampPages() {
         const baked = bake && fs.existsSync(path.join(path.dirname(page), BAKE_FILE));
         out = out.replace(BLOCK, modulesBlock(imports, baked));
       } else {
-        warn(`${path.relative(ROOT, page)}: imports /lib modules but has no <!-- webdata:modules --> block; it can run stale code on Safari (copy the block from templates/report/index.html)`);
+        warn(`${shortPath(page)}: imports /lib modules but has no <!-- webdata:modules --> block; it can run stale code on Safari (copy the block from templates/report/index.html)`);
       }
     }
-    if (writeIfChanged(page, out)) log(`${path.relative(ROOT, page)}: shared file versions updated`);
+    if (writeIfChanged(page, out)) log(`${shortPath(page)}: shared file versions updated`);
   }
 }
 
 // ---------------------------------------------------------------- main
+
+/** --platform (admin/install.sh, as root): the shared pages and the front page's app files. */
+function platformOnce() {
+  warnings = [];
+  stampPages(platformPages());
+  const home = readJSON(path.join(PLATFORM, 'report.json'), { title: 'Reports' });
+  home.theme_color ||= '#2a78d6';
+  buildApp(PLATFORM, home, '/');
+}
 
 async function syncOnce() {
   warnings = [];
@@ -444,7 +457,7 @@ async function syncOnce() {
 
 /** Cheap change detector: stats of every input, no file contents. */
 function fingerprint() {
-  const parts = [statSig(path.join(OMB, 'bots.json')), statSig(path.join(ROOT, 'sync.json'))];
+  const parts = [statSig(path.join(OMB, 'bots.json')), statSig(SYNC_JSON)];
   for (const b of listBots()) parts.push(statSig(b.db), statSig(b.db + '.wal'));
   const walk = (dir, depth) => {
     let entries = [];
@@ -462,8 +475,7 @@ function fingerprint() {
   try {
     for (const e of fs.readdirSync(REPORTS)) parts.push(`${e}:${fs.existsSync(path.join(REPORTS, e, BAKE_FILE))}`);
   } catch {}
-  walk(path.join(WEB, 'lib'), 0);   // every shared file: a change re-versions pages
-  parts.push(statSig(path.join(WEB, 'report.json')), statSig(path.join(WEB, 'icon.svg')));
+  walk(path.join(PLATFORM, 'lib'), 0);   // every shared file: a new install re-versions report pages
   return hash(parts.join('\n'));
 }
 
@@ -486,6 +498,11 @@ function runBake() {
 }
 
 async function main() {
+  if (process.argv.includes('--platform')) {
+    platformOnce();
+    console.log(`ok: shared pages in ${PLATFORM}, ${warnings.length} warning(s)`);
+    process.exit(warnings.length ? 2 : 0);
+  }
   const watch = process.argv.includes('--watch');
   if (!watch) {
     if (!acquireLock(60_000)) { console.error('another sync is running; gave up after 60s'); process.exit(1); }

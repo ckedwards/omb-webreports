@@ -15,7 +15,8 @@
 // v1.5.6) and its package metadata doesn't say which engine it contains. So
 // this downloads the build's duckdb-mvp.wasm from jsDelivr (~8 MB), loads it
 // with stand-in imports, and calls DuckDB's own duckdb_library_version().
-// Results are cached in ~/.cache/omb-webreports (published builds never change).
+// Results are cached (published builds never change): /var/cache/omb-webreports
+// as root, else ~/.cache/omb-webreports.
 //
 // Matching: node-api "1.5.6-r.1" is engine v1.5.6. Among DuckDB-WASM builds
 // with that engine, a stable release wins over a pre-release, then the newest.
@@ -32,7 +33,11 @@ const OMB_PKG = 'openmausbot';
 const OMB_REPO = 'milind-soni/OpenMausBot';
 const OLDEST_WASM = '1.29.0';      // older builds predate anything OpenMausBot pins
 const OMB_LOOKBACK = 40;           // releases to search for omb-match
-const CACHE = path.join(process.env.XDG_CACHE_HOME || path.join(os.homedir(), '.cache'), 'omb-webreports', 'duckdb-versions.json');
+// As root (the admin scripts) the cache is /var/cache/omb-webreports, readable by
+// everyone (webdata-info) and writable only by root; otherwise the user's own.
+export const SYSTEM_CACHE = '/var/cache/omb-webreports/duckdb-versions.json';
+const CACHE = process.getuid?.() === 0 ? SYSTEM_CACHE
+  : path.join(process.env.XDG_CACHE_HOME || path.join(os.homedir(), '.cache'), 'omb-webreports', 'duckdb-versions.json');
 
 class NoMatch extends Error {}
 

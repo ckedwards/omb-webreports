@@ -12,9 +12,9 @@ runs OpenMausBot and owns the omb-webreports checkout.
 3. [OpenMausBot and its native modules](#3-openmausbot-and-its-native-modules) ← the DuckDB part
 4. [Run OpenMausBot as a service](#4-run-openmausbot-as-a-service)
 5. [Chrome for the bots' browser](#5-chrome-for-the-bots-browser)
-6. [Configure omb-webreports](#6-configure-omb-webreports)
+6. [HTTPS for phones](#6-https-for-phones)
 7. [Install](#7-install)
-8. [HTTPS for phones](#8-https-for-phones)
+8. [Settings and updates](#8-settings-and-updates)
 9. [Teach your bots the skills](#9-teach-your-bots-the-skills)
 10. [Optional: job failure notifications](#10-optional-job-failure-notifications)
 11. [Verify everything](#11-verify-everything)
@@ -39,7 +39,7 @@ tailscale ip -4          # this machine's tailnet address, e.g. 100.x.y.z
 ```
 
 In the Tailscale admin console, enable **MagicDNS** and **HTTPS certificates**
-(needed for step 8).
+(needed for step 6).
 
 ## 3. OpenMausBot and its native modules
 
@@ -85,17 +85,18 @@ results, and it reads the same files the bots write. DuckDB-WASM has its own
 version numbers and release schedule (DuckDB-WASM 1.33.1-dev65.0 contains
 DuckDB v1.5.6), and it can lag a new DuckDB by weeks. So upgrading OpenMausBot
 first checks that a matching DuckDB-WASM build exists, and pins the browser to it
-(`DUCKDB_WASM_VERSION` in `config.env`).
+(`DUCKDB_WASM_VERSION` in `/etc/omb-webreports/config.env`).
 
 ### Install
 
-[`admin/openmausbot-upgrade.sh`](../admin/openmausbot-upgrade.sh) in the
-omb-webreports checkout does all of it, so get the checkout first:
+omb-webreports is installed from a **root-owned clone**: its installer, update
+and OpenMausBot-upgrade scripts run as root, so nothing your user (or a bot
+running as you) can write may end up in them. Clone it as root, then run
+[`admin/openmausbot-upgrade.sh`](../admin/openmausbot-upgrade.sh) from it:
 
 ```bash
-git clone https://github.com/ckedwards/omb-webreports.git ~/omb-webreports
-cd ~/omb-webreports
-admin/openmausbot-upgrade.sh            # latest release; or: admin/openmausbot-upgrade.sh 0.1.107
+sudo git clone https://github.com/ckedwards/omb-webreports.git /usr/local/src/omb-webreports
+sudo /usr/local/src/omb-webreports/admin/openmausbot-upgrade.sh     # latest; or add a version: 0.1.107
 ```
 
 It:
@@ -105,22 +106,23 @@ It:
    has one and asks whether to continue anyway; when it can't ask (no
    terminal, e.g. in a script or cron) it stops. `--skip-browser-check`
    continues regardless;
-3. installs or upgrades `openmausbot` and the native modules globally (with
-   `sudo`), and creates the systemd drop-in if it's missing;
-4. writes `DUCKDB_WASM_VERSION` into `config.env` (creating it from
-   `config.example.env` if needed), restarts `webdata-sync`/`webdata-jobs` if
-   they're installed, then restarts OpenMausBot.
+3. installs or upgrades `openmausbot` and the native modules globally, and
+   creates the systemd drop-in if it's missing;
+4. once omb-webreports is installed, writes `DUCKDB_WASM_VERSION` into
+   `/etc/omb-webreports/config.env` and restarts `webdata-sync`/`webdata-jobs`
+   (on this first run there's nothing to update yet; the installer picks the
+   build in step 7), then restarts OpenMausBot.
 
 On a first install it stops after step 4 with a note that the OpenMausBot service
 doesn't exist yet; that's the next step. `admin/openmausbot-upgrade.sh --check`
-shows the installed versions, whether browser and server match, and the newest
-release with a match, without changing anything.
+(no `sudo` needed) shows the installed versions, whether browser and server
+match, and the newest release with a match, without changing anything.
 
 <details>
-<summary>The same thing by hand (OpenMausBot 0.1.104)</summary>
+<summary>The same thing by hand (OpenMausBot 0.1.107)</summary>
 
 ```bash
-sudo npm install -g openmausbot@0.1.104
+sudo npm install -g openmausbot@0.1.107
 sudo npm install -g @duckdb/node-api@1.5.6-r.1 @resvg/resvg-js@2.6.2
 sudo mkdir -p /etc/systemd/system/openmausbot.service.d
 printf '[Service]\nEnvironment=OMB_DUCKDB_DIR=/usr/lib\n' | \
@@ -131,13 +133,9 @@ For other releases, take the versions from
 `https://raw.githubusercontent.com/milind-soni/OpenMausBot/v<version>/package.json`.
 </details>
 
-The by-hand route skips the browser check; afterwards run
-`admin/openmausbot-upgrade.sh --check`, and set `DUCKDB_WASM_VERSION` to the
-build it reports.
-
-**Always upgrade OpenMausBot with the script** (`admin/openmausbot-upgrade.sh`):
-a new release may pin new native module versions, which `npm install -g
-openmausbot` alone won't install, and the browser's DuckDB has to follow.
+**Always upgrade OpenMausBot with the script**: a new release may pin new
+native module versions, which `npm install -g openmausbot` alone won't install,
+and the browser's DuckDB has to follow.
 
 ## 4. Run OpenMausBot as a service
 
@@ -181,69 +179,81 @@ sudo openmausbot browser install --with-deps   # once, as root: the libraries
 openmausbot browser install                    # as you: agent-browser + Chrome
 ```
 
-## 6. Configure omb-webreports
-
-The checkout from step 3 can live anywhere you own (move it now if you want it
-elsewhere). The upgrade script created `config.env`; if it's missing, `cp
-config.example.env config.env`. Edit it; the defaults work for a typical setup:
-
-| Setting | Default | Set it when |
-|---|---|---|
-| `WEBREPORTS_OWNER` | the user who runs `sudo` | you install from another account |
-| `LISTEN_IP` | `tailscale ip -4` | you don't use Tailscale, or want another address |
-| `LISTEN_PORT` | `8080` | the port is taken |
-| `ALLOWED_NETS` | Tailscale's ranges | clients come from elsewhere (e.g. `127.0.0.1`) |
-| `SITE_URL` | `http://LISTEN_IP:LISTEN_PORT` | **set it** to your HTTPS URL from step 8, e.g. `https://mybox.tail1234.ts.net:8443`: tools and bots use it in links |
-| `OMB_DATA_DIR` | `~/.openmausbot` | OpenMausBot runs with another `--data-dir` |
-| `NODE_MODULES_DIR` | `/usr/lib/node_modules` | your global modules live elsewhere |
-| `DUCKDB_WASM_VERSION` | set by `admin/openmausbot-upgrade.sh` | never by hand: it's the browser build matching OpenMausBot's DuckDB |
-| `OMB_LOOPBACK_TRUST` | `service` (isolated) | `owner` to let any local program act as you in OpenMausBot (its own default), or empty to leave it alone |
-
-## 7. Install
-
-```bash
-sudo bash admin/install.sh --print   # optional: show every file it will write
-sudo bash admin/install.sh
-```
-
-The installer:
-
-- checks the prerequisites (Node 20+, the two native modules, OpenMausBot's data
-  dir), and warns if the browser's DuckDB doesn't match OpenMausBot's;
-- installs Apache and **dedicates it to this site**: it replaces
-  `/etc/apache2/ports.conf` to listen only on `LISTEN_IP:LISTEN_PORT`,
-  disables the default site, and installs a hardened virtual host serving
-  `webroot/` (see [architecture](architecture.md#security-model)). Don't run it
-  on a machine whose Apache serves other sites;
-- gives Apache's user read-only access to `webroot/` and traverse-only access
-  to the folders above it (POSIX ACLs; it can't list or read anything else);
-- installs and starts two services running as you, sandboxed:
-  `webdata-sync` (publishes bot databases) and `webdata-jobs` (scheduled jobs);
-- **isolates OpenMausBot** (`OMB_LOOPBACK_TRUST=service`): programs on this
-  machine, your bots' shells included, can no longer administer it without a
-  login. webdata-skills gets a session of its own first, kept where only root
-  can read it, plus a daily timer that keeps it valid (see
-  [architecture](architecture.md#security-model));
-- adds the Report builder preset to OpenMausBot and updates bots' copies of the
-  skills (`webdata-skills sync`, step 9), if OpenMausBot is running;
-- links the `webdata-*` tools into `/usr/local/bin`.
-
-It's idempotent: re-run it after `git pull` or after editing `config.env`.
-
-## 8. HTTPS for phones
+## 6. HTTPS for phones
 
 Plain HTTP works on the tailnet, but iPhones treat it as insecure. Put
-Tailscale's HTTPS in front (the port is your choice; 8443 keeps 443 free for
-OpenMausBot's own `--tailscale` endpoint):
+Tailscale's HTTPS in front before installing, so the installer can suggest the
+right address (the port is your choice; 8443 keeps 443 free for OpenMausBot's
+own `--tailscale` endpoint):
 
 ```bash
 tailscale serve --bg --https=8443 http://$(tailscale ip -4):8080
 tailscale serve status
 ```
 
-Set `SITE_URL` in `config.env` to the URL it prints (e.g.
-`https://mybox.tail1234.ts.net:8443`); the tools read it on each run, no
-reinstall needed.
+## 7. Install
+
+```bash
+sudo /usr/local/src/omb-webreports/admin/install.sh
+```
+
+The first run asks a few questions and writes the answers to
+`/etc/omb-webreports/config.env` (root-owned). Press Enter to take a default:
+
+| Question | Default |
+|---|---|
+| The user that runs OpenMausBot (`WEBREPORTS_OWNER`) | the user who ran `sudo` |
+| Where your reports, published data and jobs live (`DATA_DIR`) | `/var/lib/omb-webreports` |
+| Address and port Apache listens on (`LISTEN_IP`, `LISTEN_PORT`) | `tailscale ip -4`, `8080` |
+| Networks allowed to read the site (`ALLOWED_NETS`) | Tailscale's ranges |
+| The address people open (`SITE_URL`) | the `tailscale serve` HTTPS address from step 6, if there is one |
+| OpenMausBot's data folder, global node_modules | `~/.openmausbot`, `/usr/lib/node_modules` |
+| Isolate OpenMausBot from local programs (`OMB_LOOPBACK_TRUST`) | `service` (yes) |
+
+It also looks up the DuckDB-WASM build matching OpenMausBot's DuckDB
+(`DUCKDB_WASM_VERSION`). Then it:
+
+- checks the prerequisites (Node 20+, the two native modules, OpenMausBot's data
+  dir) and that it's running from a root-owned source (otherwise it refuses;
+  see [development](development.md));
+- copies just what runs into **`/usr/local/lib/omb-webreports`**, owned by root:
+  the tools, skills, report template, the agent docs and the shared site files;
+- creates `DATA_DIR`, owned by you: `reports/`, `data/`, `jobs/` (Apache may read
+  only `reports/` and `data/`);
+- installs Apache and **dedicates it to this site**: it replaces
+  `/etc/apache2/ports.conf` to listen only on `LISTEN_IP:LISTEN_PORT`,
+  disables the default site, and installs a hardened virtual host (see
+  [architecture](architecture.md#security-model)). Don't run it on a machine
+  whose Apache serves other sites;
+- installs and starts two services running as you, sandboxed:
+  `webdata-sync` (publishes bot databases) and `webdata-jobs` (scheduled jobs);
+- **isolates OpenMausBot** (`OMB_LOOPBACK_TRUST=service`): programs on this
+  machine, your bots' shells included, can no longer administer it without a
+  login. webdata-skills gets a session of its own first, kept where only root
+  can read it, plus a daily timer that keeps it valid;
+- adds the Report builder preset to OpenMausBot and updates bots' copies of the
+  skills (`webdata-skills sync`, step 9), if OpenMausBot is running;
+- links the `webdata-*` tools into `/usr/local/bin` and records what it
+  installed (source and commit) in `/etc/omb-webreports/installed.json`.
+
+`sudo admin/install.sh --print` shows every system file it writes, without
+changing anything. Coming from the old layout (a checkout in your home folder
+with its own `config.env`)? Add `--migrate-from ~/webdata`: it takes that
+checkout's settings, reports, jobs and job history.
+
+## 8. Settings and updates
+
+Settings live in `/etc/omb-webreports/config.env`: edit it as root, then
+re-run `sudo /usr/local/src/omb-webreports/admin/install.sh`. To update:
+
+```bash
+sudo /usr/local/src/omb-webreports/admin/update.sh              # newest on the clone's branch
+sudo /usr/local/src/omb-webreports/admin/update.sh --ref v1.2.0 # a tag, branch or commit
+```
+
+It refuses if the clone isn't root-owned or has local changes, fast-forwards
+it with git, then runs the (new) installer. `webdata-info` shows what's
+installed and where it came from.
 
 ## 9. Teach your bots the skills
 
@@ -269,14 +279,14 @@ sudo webdata-skills add Bramble     # the bot's name; adds the four skills, swit
 
 ```
 /learn Create one skill per file with skill_manage, using each file's contents
-exactly as written: ~/omb-webreports/skills/webdata-reports-read/SKILL.md,
-~/omb-webreports/skills/webdata-report-create/SKILL.md,
-~/omb-webreports/skills/webdata-report-update/SKILL.md and
-~/omb-webreports/skills/webdata-data-job/SKILL.md. Use the file path as the source.
+exactly as written: /usr/local/lib/omb-webreports/skills/webdata-reports-read/SKILL.md,
+/usr/local/lib/omb-webreports/skills/webdata-report-create/SKILL.md,
+/usr/local/lib/omb-webreports/skills/webdata-report-update/SKILL.md and
+/usr/local/lib/omb-webreports/skills/webdata-data-job/SKILL.md. Use the file path as the source.
 ```
 
-However a bot got them, **updates are automatic**: `admin/install.sh` (after a
-`git pull`) and `admin/openmausbot-upgrade.sh` finish with `webdata-skills
+However a bot got them, **updates are automatic**: `admin/update.sh` (through
+the installer) and `admin/openmausbot-upgrade.sh` finish with `webdata-skills
 sync`, which replaces outdated copies in every bot that has them (keeping each
 skill on or off as it was) and swaps in the new release of the preset.
 `sudo webdata-skills status` shows which bots have the skills and whether

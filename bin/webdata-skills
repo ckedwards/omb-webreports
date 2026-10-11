@@ -122,6 +122,10 @@ async function status() {
 
 async function packageCmd() {
   if (isRoot() && !flags.has('--check')) throw new OmbError('run package as the checkout\'s owner, not root (it writes into skills/)');
+  if (!flags.has('--check')) {
+    try { fs.accessSync(path.dirname(PACKAGE_FILE), fs.constants.W_OK); }
+    catch { throw new OmbError(`can't write ${path.dirname(PACKAGE_FILE)}: package is a development command; run it from your checkout (bin/webdata-skills package)`); }
+  }
   const committed = readPackageFile();
   const doc = buildPackage(repoSkills(), committed);
   const findings = await checkSkills();

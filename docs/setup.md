@@ -1,11 +1,12 @@
 # Setup
 
 From a fresh machine to a working reports site with bots that can build
-reports. Tested on **Ubuntu 26.04 LTS** with OpenMausBot 0.1.104; other
+reports. Tested on **Ubuntu 26.04 LTS** with OpenMausBot 0.1.107; other
 Debian-family releases with systemd should work the same.
 
 Everything runs as one normal user (below: `you`) who has `sudo`. That user
-runs OpenMausBot and owns the omb-webreports checkout.
+runs OpenMausBot and owns the content folder (`/var/lib/omb-webreports`: reports,
+published data, jobs); the program itself is root's.
 
 1. [Base packages](#1-base-packages)
 2. [Tailscale](#2-tailscale)
@@ -16,8 +17,9 @@ runs OpenMausBot and owns the omb-webreports checkout.
 7. [Install](#7-install)
 8. [Settings and updates](#8-settings-and-updates)
 9. [Teach your bots the skills](#9-teach-your-bots-the-skills)
-10. [Optional: job failure notifications](#10-optional-job-failure-notifications)
+10. [Job failure notifications](#10-job-failure-notifications)
 11. [Verify everything](#11-verify-everything)
+12. [Optional: open it to the internet](#12-optional-open-it-to-the-internet)
 
 ## 1. Base packages
 
@@ -28,8 +30,9 @@ sudo apt-get install -y git curl ca-certificates python3 acl
 
 ## 2. Tailscale
 
-The site is only reachable from your tailnet, and Tailscale also provides the
-HTTPS certificate. Install it from Tailscale's repository (the commands for
+The site is reachable from your tailnet (and, only if you choose, the internet
+through Tailscale Funnel: step 12), and Tailscale also provides the HTTPS
+certificate. Install it from Tailscale's repository (the commands for
 your release are at https://tailscale.com/download/linux), for example:
 
 ```bash
@@ -158,13 +161,17 @@ Then run the upgrade script once more so it sees the service, checks the
 drop-in and restarts with the native modules:
 
 ```bash
-admin/openmausbot-upgrade.sh
+sudo /usr/local/src/omb-webreports/admin/openmausbot-upgrade.sh
 systemctl show openmausbot -p Environment     # must include OMB_DUCKDB_DIR=/usr/lib
 ```
 
-Pair your phone or browser with OpenMausBot now, as its docs describe (after
-step 7 isolates OpenMausBot, its CLI can no longer pair devices; you'd do it in
-the app, Settings → Remote access). Create a bot,
+(After step 7 this is `sudo webdata-admin upgrade-openmausbot`.)
+
+Pair your phone or browser with OpenMausBot now, as its docs describe. (After
+step 7 isolates OpenMausBot, its CLI can no longer pair devices: pair from a
+signed-in device, Settings → Remote access, or with `sudo webdata-admin pair`.
+The web app shows a bot's threads only with Settings → General → Advanced mode
+on, per browser.) Create a bot,
 and confirm its data tools work: ask it to create a small table. If you see
 `engine_unavailable`, go back to step 3.
 
@@ -222,8 +229,9 @@ It also looks up the DuckDB-WASM build matching OpenMausBot's DuckDB
   see [development](development.md));
 - copies just what runs into **`/usr/local/lib/omb-webreports`**, owned by root:
   the tools, skills, report template, the agent docs and the shared site files;
-- creates `DATA_DIR`, owned by you: `reports/`, `data/`, `jobs/` (Apache may read
-  only `reports/` and `data/`);
+- creates `DATA_DIR`, owned by you: `reports/`, `data/`, `jobs/`, `access/` (Apache
+  may read only `reports/` and `data/`; the gate only `reports/`, where it
+  opens each `report.json`, and `access/`);
 - installs Apache and **dedicates it to this site**: it replaces
   `/etc/apache2/ports.conf` to listen only on `127.0.0.1:LISTEN_PORT`,
   disables the default site, and installs a hardened virtual host (see
@@ -234,15 +242,20 @@ It also looks up the DuckDB-WASM build matching OpenMausBot's DuckDB
   ([data and passwords](#12-optional-open-it-to-the-internet)) and passes
   everything else to Apache;
 - installs and starts two services running as you, sandboxed:
-  `webdata-sync` (publishes bot databases) and `webdata-jobs` (scheduled jobs);
+  `webdata-sync` (publishes bot databases) and `webdata-jobs` (scheduled jobs),
+  and `webdata-notify` (root, locked down): alerts a bot when one of its jobs
+  keeps failing (step 10);
+- points existing `tailscale serve` (and Funnel) handlers that went to Apache at
+  the gate instead;
 - **isolates OpenMausBot** (`OMB_LOOPBACK_TRUST=service`): programs on this
   machine, your bots' shells included, can no longer administer it without a
   login. webdata-skills gets a session of its own first, kept where only root
   can read it, plus a daily timer that keeps it valid;
 - adds the Report builder preset to OpenMausBot and updates bots' copies of the
   skills (`webdata-skills sync`, step 9), if OpenMausBot is running;
-- links the `webdata-*` tools into `/usr/local/bin` and records what it
-  installed (source and commit) in `/etc/omb-webreports/installed.json`.
+- links the `webdata-*` tools into `/usr/local/bin` (including `webdata-admin`,
+  for every later root task) and records what it installed (source and commit)
+  in `/etc/omb-webreports/installed.json`.
 
 `sudo admin/install.sh --print` shows every system file it writes, without
 changing anything. Coming from the old layout (a checkout in your home folder
@@ -261,7 +274,8 @@ sudo webdata-admin update --ref v1.2.0  # a tag, branch or commit
 
 It refuses if the clone isn't root-owned or has local changes, fast-forwards
 it with git, then runs the (new) installer. `webdata-info` shows what's
-installed and where it came from.
+installed and where it came from; `sudo webdata-admin status` also whether
+GitHub has something newer.
 
 ## 9. Teach your bots the skills
 
@@ -293,15 +307,15 @@ exactly as written: /usr/local/lib/omb-webreports/skills/webdata-reports-read/SK
 /usr/local/lib/omb-webreports/skills/webdata-data-job/SKILL.md. Use the file path as the source.
 ```
 
-However a bot got them, **updates are automatic**: `admin/update.sh` (through
-the installer) and `admin/openmausbot-upgrade.sh` finish with `webdata-skills
-sync`, which replaces outdated copies in every bot that has them (keeping each
-skill on or off as it was) and swaps in the new release of the preset.
+However a bot got them, **updates are automatic**: `sudo webdata-admin update`
+and `upgrade-openmausbot` finish with a skills sync, which replaces outdated
+copies in every bot that has them (keeping each skill on or off as it was) and
+swaps in the new release of the preset.
 `sudo webdata-admin skills status` shows which bots have the skills and whether
 they're current (`sudo` because, with OpenMausBot isolated, it uses a root-only
 session).
 
-Bots will ask for approval to read and write the checkout and to run the
+Bots will ask for approval to read and write the content folder and to run the
 `webdata-*` commands; allow them in the bot's settings if that gets tedious.
 
 ## 10. Job failure notifications
@@ -314,12 +328,15 @@ Nothing to do: `webdata-notify` sets up a webhook for each bot that a job's
 
 ```bash
 webdata-info                    # versions, paths, all six services "active", browser DuckDB "same as the server",
-                                # OpenMausBot isolation "on" with a webdata-skills session
+                                # access (who can reach the site), OpenMausBot isolation "on" with a session
+sudo webdata-admin status       # also: updates available, bots' skills, failure alerts
+webdata-access status           # each database and report: public or private
 webdata-check _gallery          # renders the design gallery on a headless iPhone: must print OK
 ```
 
 Then open `SITE_URL/` on your phone: the front page lists your reports and
-the published databases. Open `SITE_URL/reports/_gallery/` to see every
+the published databases (the public ones, and private ones this device has
+signed in to). Open `SITE_URL/reports/_gallery/` to see every
 component. To install a report as an app: Safari → Share → Add to Home Screen.
 
 Next: ask a bot to make its first report. Day-to-day use, logs and

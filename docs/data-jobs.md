@@ -32,7 +32,8 @@ JOBS/<name>/           (JOBS: /var/lib/omb-webreports/jobs; webdata-info --jobs)
   "tables": {
     "standings":  { "mode": "replace" },
     "daily_runs": { "mode": "upsert", "key": ["team", "date"] }
-  }
+  },
+  "notify_failure": "MyBot"
 }
 ```
 
@@ -42,9 +43,15 @@ JOBS/<name>/           (JOBS: /var/lib/omb-webreports/jobs; webdata-info --jobs)
 - table `mode`: `replace` (the table is the current state), `upsert` (history:
   rows with the same `key` are replaced, others added), `append` (immutable events).
 - per table: `min_rows` (default 1), `allow_schema_change` (replace only; default false).
+  `"min_rows": 0` for a table that can legitimately be empty (no headlines this
+  week): the script writes `[]`, and the empty table keeps its current columns.
+- `notify_failure`: the bot to alert when the job keeps failing (below).
 
 The script writes one file per declared table into `$WEBDATA_OUT`
 (`<table>.json` array of objects, `.ndjson`, `.csv` or `.parquet`) and exits 0.
+On failure it exits **75** when its source couldn't be reached (DNS or
+connection errors, timeouts, HTTP 429/5xx) and any other non-zero code when
+the source answered but not as expected; alerts treat the two differently.
 
 ## What happens on a run
 
@@ -71,6 +78,14 @@ so prefer an API or file over a browser, and keep browser calls per run few. Lim
 browser jobs multiply are in
 [future-work.md](future-work.md#browser-use-in-scheduled-jobs).
 
+**Be gentle with sources.** Every request a job makes, and every request a bot
+makes while writing and testing it, comes from this machine, so a source that
+rate-limits or blocks it blocks the scheduled job too (a cary-news job once got
+this machine blocked from Google's link lookups this way, for hours). The
+skill tells bots to fetch a sample once and develop against the saved file,
+prefer official feeds and APIs to a site's undocumented endpoints, cap, pace
+and cache per-item lookups, and stop (never work around it) when blocked.
+
 ## Commands
 
 ```bash
@@ -87,13 +102,15 @@ Editing `job.json` takes effect at the next minute; no restart.
 
 ## When a job fails
 
-`webdata-job list` shows `FAILED` (with a count if it repeats);
-`webdata-job logs <name>` shows why. Typical causes: the source was down
+`webdata-job list` shows `FAILED` (`FAILED (temporary)` for exit 75, with a
+count if it repeats, and how long it has been failing); `webdata-job logs
+<name>` shows why, ending with the network checks. Typical causes: the source was down
 (temporary; nothing to fix), the source changed its URL, layout or columns,
 or returned a value the script didn't expect. Ask the bot that owns the job to
 fix it ("job <name> failed, fix it"): its skill covers diagnosing, fixing the
 script, dry-running and one real run, and tells it not to change the schedule or
-loosen checks without asking you.
+loosen checks without asking you. With failure alerts (below) the bot is
+told on its own.
 
 ## Failure notifications
 

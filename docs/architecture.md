@@ -14,6 +14,7 @@ flowchart TB
         program[("/usr/local/lib/omb-webreports<br/>front page · lib/ · gallery (root's)")]
         apache["apache2<br/>127.0.0.1, read-only, GET/HEAD"]
         gate["webdata-gate<br/>password access"]
+        notify["webdata-notify.service<br/>failure alerts (root)"]
     end
     ts["tailscale serve (tailnet)<br/>or Funnel (internet), HTTPS"]
     client["Phone / browser<br/>report + kit.js + DuckDB-WASM"]
@@ -34,14 +35,18 @@ flowchart TB
     client -. "checks ETags<br/>every 15 s" .-> ts
     ts -- "pages, kit, bakes, snapshots" --> client
     cdn -- "DuckDB-WASM" --> client
+    jobs -. "status, as data" .-> notify
+    notify -- "webhook: a task<br/>to fix the job" --> omb
 ```
 
 Dotted lines are polling: nothing pushes changes downstream. `webdata-sync`
 checks the bots' databases and the report files every 3 s, and open pages check
 the published files' ETags every 15 s (see [Data flow](#data-flow)).
 
-The three services run as you; `webdata-sync` and `webdata-jobs` are
-sandboxed (see [Security model](#security-model)). Apache runs as `www-data`
+`webdata-sync` and `webdata-jobs` run as you, sandboxed (see
+[Security model](#security-model)); `webdata-notify` runs as root because it
+holds the webhooks' secrets, and `webdata-gate` as its own user because it
+holds the cookie-signing key. Apache runs as `www-data`
 and listens only on `127.0.0.1:LISTEN_PORT`; people reach it through
 `webdata-gate` (`127.0.0.1:GATE_PORT`), which tailscale serve points at.
 
@@ -52,9 +57,10 @@ and listens only on `127.0.0.1:LISTEN_PORT`; people reach it through
 | `webdata-jobs` | `bin/webdata-job daemon` | Cron scheduler for `jobs/*`: runs scripts, validates output, writes it into bot databases. |
 | Apache | `/etc/apache2/sites-available/webdata.conf` | Serves the shared site files from the program and `reports/`, `data/` from the content folder: static files only. |
 | `webdata-gate` | `bin/webdata-gate`, as `omb-webreports-gate` | The front door: password access per database, then passes requests to Apache unchanged. |
+| `webdata-notify` | `bin/webdata-notify daemon`, as root | Keeps an OpenMausBot webhook for each bot that jobs name in `notify_failure`, and starts a task in that bot when a job keeps failing. |
 | kit | `/lib/kit.js`, `kit.css` (in the program) | Browser runtime every report uses: DuckDB-WASM, live updates, result cache, baked first render, charts, tables, design tokens. |
 | Reports | `/var/lib/omb-webreports/reports/<slug>/` | One directory each: `index.html`, `report.json`, `icon.svg`. One home-screen app each. |
-| Tools | `bin/webdata-*` → `/usr/local/bin` | CLI for people and bots. |
+| Tools | `bin/webdata-*` → `/usr/local/bin` | CLI for people and bots; `webdata-admin` is everything that needs root (people only, with `sudo`). |
 
 ## Data flow
 
@@ -184,9 +190,10 @@ own copy of a skill, so editing `skills/` changes nothing by itself.
   (its template format) generated from the skill files: the four skills and a
   "Report builder" preset with standing instructions. Its release only changes
   when the content does, so re-importing an unchanged package is a no-op.
-- *`webdata-skills add <bot>`* for existing bots, or OpenMausBot's `/learn`.
-- *`webdata-skills sync`* (run by `admin/install.sh` and
-  `admin/openmausbot-upgrade.sh`) compares each bot's copy with the installed skills by
+- *`sudo webdata-admin skills add <bot>`* for existing bots, or OpenMausBot's `/learn`.
+- *`webdata-skills sync`* (run by `admin/install.sh`, so by every update, and by
+  `admin/openmausbot-upgrade.sh`; by hand `sudo webdata-admin skills sync`)
+  compares each bot's copy with the installed skills by
   SHA-256 and replaces outdated ones through OpenMausBot's API (remove, then
   install the new text; the old copy is put back if that fails), keeping each
   skill on or off as it was. It imports the current preset release and removes
@@ -200,9 +207,11 @@ described under "OpenMausBot isolation" below.
 
 ## Security model
 
-What's exposed is a read-only static site on your tailnet. Assumptions: the
-machine runs only this site's Apache; people on your tailnet may read every
-published database.
+What's exposed is a read-only static site, on your tailnet or (with Funnel)
+the internet, behind `webdata-gate`. Assumptions: the machine runs only this
+site's Apache; whoever can reach the site may read every public database and
+the reports that read it; private ones need their password, which everyone
+who can use the bots is meant to know.
 
 **Code is root's, content is yours.** Bots run as the owner, so anything the
 owner can write, a bot can change. Everything that runs as root, or that every
@@ -225,7 +234,11 @@ write: reports, jobs, and the published data and state the services generate.
   the old `config.env` as data), never runs git in a repository the owner can
   write (it runs git there as that owner), and changes things inside the content
   folder as the owner (`runuser`), not following symlinks.
-- The services run the root-owned program as the owner, sandboxed.
+- The services run the root-owned program as the owner, sandboxed (the two
+  that hold secrets as root and as their own user, above and below).
+- Everything people do as root goes through `sudo webdata-admin`. It runs the
+  admin scripts only from a clone it has checked is root-only, and has no
+  unsafe mode.
 
 **Apache** (`admin/install.sh` writes it):
 - listens only on `127.0.0.1:LISTEN_PORT` and answers only this machine
@@ -262,8 +275,8 @@ password, so it fails closed).
   per database, and one check at a time. tailscale serve and Funnel send
   everyone from 127.0.0.1, so there's no per-visitor address to limit by;
   that's why passwords need 12+ characters.
-- The gate's unit: its own system user, read access only to the reports'
-  `report.json` and `access/` (ACLs), localhost only, read-only system, no
+- The gate's unit: its own system user, read access only to `reports/` (it
+  opens each `report.json`) and `access/` (ACLs), localhost only, read-only system, no
   capabilities. The tools on this machine (`webdata-check`, the bake) use
   Apache directly and see everything, as bots could anyway.
 - What it isn't: per-person accounts or audit. Report and database names can
@@ -335,9 +348,10 @@ The only third-party code loaded at runtime is DuckDB-WASM from jsDelivr, at a
 pinned version. `webdata-browse` uses a fresh, empty Chrome profile per call,
 with Chrome's own sandbox on.
 
-**Not covered:** authentication beyond network access (anyone on the tailnet
-can read every report and published database: use `exclude_bots` in
-`sync.json` for bots whose data shouldn't be published), and multi-user isolation.
+**Not covered:** per-person accounts (a password is shared by everyone who
+knows it; to keep a bot's data off the site entirely, use `exclude_bots` in
+`sync.json`), audit logs of who viewed what, and multi-user isolation on the
+machine itself.
 
 ## Files and state
 
@@ -351,6 +365,9 @@ can read every report and published database: use `exclude_bots` in
 | `/var/lib/omb-webreports/reports/<slug>/` | your reports (and their generated icons, manifest, `initial.json`) | you |
 | `/var/lib/omb-webreports/data/` | published snapshots, catalog (generated) | you |
 | `/var/lib/omb-webreports/jobs/<name>/` | your data jobs | you |
+| `/var/lib/omb-webreports/access/<db>.json` | who may see each database (`webdata-access`; scrypt hashes) | you |
+| `/var/lib/omb-webreports-gate/key` | the key that signs visitors' cookies (0600) | `omb-webreports-gate` |
+| `/var/lib/omb-webreports-notify/` | failure alerts: `status.json` (readable), `private/` webhook secrets and state (0700) | root |
 | `/var/lib/omb-webreports/.state/` | sync and bake state, the baker's Chrome profile, job status and logs | you |
 | `/var/cache/omb-webreports/` | which DuckDB engine each DuckDB-WASM build contains | root |
 | `/etc/apache2/…`, `/etc/systemd/system/webdata-*` | written by `admin/install.sh` | root |

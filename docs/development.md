@@ -23,7 +23,7 @@ checkout**, as yourself, against the live content:
 ```bash
 cd ~/repos/omb-webreports
 bin/webdata-sync --once            # your sync code, against the live data
-bin/webdata-check blue-jays-2026   # your checker; the page is served by the installed site
+bin/webdata-check blue-jays-2026   # your checker; the page is served by the installed site (Apache, 127.0.0.1)
 bin/webdata-skills package         # regenerate skills/omb-webreports.openmaus.json after editing skills/
 ```
 
@@ -57,6 +57,29 @@ with `OMB_WEBREPORTS_CONFIG=/tmp/omb-test/etc/omb-webreports/config.env` plus
 `DATA_DIR`/`PLATFORM_DIR` overrides. Test against a throwaway OpenMausBot
 (`openmausbot serve --port 18799 --data-dir /tmp/omb-test-omb`, then
 `OMB_URL=http://127.0.0.1:18799`), never your real bots.
+
+## Testing the gate and the alerts
+
+Both are root-side services, so test them against throwaway copies, never the
+live ones:
+
+- **webdata-gate:** generate the Apache config with a `--destdir` install
+  (`LISTEN_PORT=18080 GATE_PORT=18081 DATA_DIR=/tmp/omb-test-data`), start a
+  throwaway Apache from it as yourself (`/usr/sbin/apache2 -f <conf> -k start`,
+  with a `PidFile`, `ErrorLog` and the modules the vhost needs), copy a few
+  reports and databases into the test `DATA_DIR`, and run
+  `OMB_WEBREPORTS_CONFIG=<the test config.env> WEBDATA_GATE_KEY=/tmp/gatekey bin/webdata-gate`.
+  `bin/webdata-access` with the same `OMB_WEBREPORTS_CONFIG` sets passwords
+  there. Test path tricks with `curl --path-as-is`: plain curl removes `./` and
+  `%2e%2e` itself, so the gate never sees them.
+- **webdata-notify:** a throwaway OpenMausBot (above) with a bot or two, scratch
+  jobs, and `WEBDATA_JOBS_DIR`, `WEBDATA_JOBS_STATE`, `WEBDATA_NOTIFY_DIR`,
+  `OMB_URL` and `WEBDATA_OMB_SESSION` (a file that doesn't exist) pointing at
+  them; `bin/webdata-notify once` runs one pass. The alert rules
+  (`decide()` in `bin/_notify.mjs`) can be tested on their own.
+
+Stop throwaway servers by their own process group (`ss -ltnp` names the
+listening process), never with a `pkill -f` pattern.
 
 ## Releasing
 

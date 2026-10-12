@@ -292,8 +292,8 @@ EOF
 
 # The front door. Its own system user: the key that signs visitors' cookies is
 # in its StateDirectory, which neither the owner (and so bots) nor Apache can
-# read. It may read only the reports' report.json and the access settings (ACLs
-# below), and talk only to Apache on this machine.
+# read. It may read only reports/ (it opens each report.json) and the access
+# settings (ACLs below), and talk only to Apache on this machine.
 put /etc/systemd/system/webdata-gate.service <<EOF
 # Written by omb-webreports admin/install.sh.
 [Unit]

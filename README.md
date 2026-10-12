@@ -3,7 +3,8 @@
 **Live, phone-first data reports for your [OpenMausBot](https://www.npmjs.com/package/openmausbot) bots.**
 
 Your bots collect data into their DuckDB databases. omb-webreports publishes
-those databases to a private, Tailscale-only website where bots build
+those databases to a private website (your tailnet; optionally the internet,
+with a password per database) where bots build
 **reports**: small, self-contained web apps with stat tiles, charts and
 tables that query the data in the browser and update themselves when it
 changes. Save any report to your iPhone home screen and it behaves like an app.
@@ -55,7 +56,7 @@ changes. Save any report to your iPhone home screen and it behaves like an app.
                                    │  webdata-sync (service): consistent copy,
                                    │  browser-compatible format, ~240 KB → ~8 KB on the wire
                                    ▼
- scheduled job ─────────▶ webroot/data/<bot>.duckdb + catalog.json
+ scheduled job ─────────▶ DATA/<bot>.duckdb + catalog.json  (DATA: /var/lib/omb-webreports/data)
  (webdata-jobs service:            │  + reports/<slug>/initial.json: each report's first
   script → validate → apply)       │    render, baked in headless Chrome after every change
                                    │  Apache (127.0.0.1) ← webdata-gate (passwords) ← tailscale serve/Funnel
@@ -71,13 +72,13 @@ More in [docs/architecture.md](docs/architecture.md).
 | | Tested with | Notes |
 |---|---|---|
 | Linux with systemd | Ubuntu 26.04 LTS | Debian-family (uses `apt`, Apache layout of Debian/Ubuntu). |
-| [OpenMausBot](https://www.npmjs.com/package/openmausbot) | 0.1.104 | Running as a systemd service, as the same user that owns this checkout. |
+| [OpenMausBot](https://www.npmjs.com/package/openmausbot) | 0.1.107 | Running as a systemd service, as the user who owns the content folder (`/var/lib/omb-webreports`). |
 | OpenMausBot's native modules | `@duckdb/node-api` 1.5.6-r.1, `@resvg/resvg-js` 2.6.2 | **Not shipped by the npm package.** Installed by [admin/openmausbot-upgrade.sh](admin/openmausbot-upgrade.sh); see [setup step 3](docs/setup.md#3-openmausbot-and-its-native-modules). |
 | DuckDB-WASM (in the browser) | 1.33.1-dev65.0 = DuckDB v1.5.6 | Loaded from jsDelivr. **Kept on the same DuckDB version as OpenMausBot's** by the upgrade script, which won't move to a release without a matching build unless you say so. |
 | Node.js | 24 (20+ required) | NodeSource packages. |
 | Apache httpd | 2.4.66 | Installed by `admin/install.sh`; **dedicated to this site** (it rewrites `ports.conf`). |
 | git | | The source is a root-owned clone; updates are `git pull`s (`admin/update.sh`). |
-| Tailscale | 1.104 | Private access + HTTPS via `tailscale serve`. |
+| Tailscale | 1.104 | Private access + HTTPS via `tailscale serve`; optionally Funnel to open it to the internet. |
 | agent-browser + Chrome | 0.37.0 + Chrome for Testing 155 | `openmausbot browser install --with-deps`; used to check reports and to scrape JS-rendered pages. |
 | Python 3, `acl` | 3.14 | Python for job scripts; `acl` installed by the installer. |
 
@@ -114,6 +115,7 @@ Talk to your bot:
 - *"Make a report of the batting stats: leaders, OBP vs. SLG, a sortable table."*
 - *"Add a chart of runs per game to the season report."*
 - *"Create a cron task to update this data hourly."*
+- *"Make the Cary site private with the password …"* · *"Change the Cary site's password."*
 
 From a shell:
 
@@ -129,6 +131,7 @@ From a shell:
 | `webdata-job list\|run\|logs\|enable\|disable` | scheduled data jobs |
 | `webdata-browse <url> --eval '<js>'` | headless Chrome for job scripts |
 | `webdata-access status\|set\|public\|private\|default` | who can see each database and the reports that read it (passwords) |
+| `webdata-notify status` | failure alerts: each bot's webhook, each job's alert state |
 | `sudo webdata-admin status\|update\|pair\|skills\|upgrade-openmausbot` | everything that needs root: install and update status, updating, pairing a new device, the bots' skills, upgrading OpenMausBot |
 
 ## Documentation
@@ -138,7 +141,7 @@ From a shell:
 | [docs/setup.md](docs/setup.md) | Install everything, step by step (incl. the OpenMausBot DuckDB fix) |
 | [docs/architecture.md](docs/architecture.md) | Components, data flow, freshness, security model, design decisions |
 | [docs/operations.md](docs/operations.md) | Day-to-day commands, logs, troubleshooting, upgrades, uninstall |
-| [docs/data-jobs.md](docs/data-jobs.md) | Scheduled data jobs and failure notifications |
+| [docs/data-jobs.md](docs/data-jobs.md) | Scheduled data jobs and failure alerts |
 | [docs/development.md](docs/development.md) | Working on omb-webreports: a dev checkout, unsafe dev installs, testing the installer |
 | [docs/future-work.md](docs/future-work.md) | Improvements designed but not built yet, and when they'd be worth it |
 | [READ_FIRST.md](READ_FIRST.md) | The guide agents read before touching reports (also `CLAUDE.md`, `AGENTS.md`) |
@@ -153,13 +156,15 @@ admin/install.sh         installs (as root, from a root-owned clone): the progra
 admin/update.sh          git pull + install (sudo webdata-admin update); --from-unsafe-dev for a development checkout
 admin/openmausbot-upgrade.sh  install/upgrade OpenMausBot + its native modules; keeps the
                          browser's DuckDB (DuckDB-WASM) on the same version as OpenMausBot's
-bin/                     the webdata-* tools
+bin/                     the webdata-* tools, and the services' programs: webdata-gate (password
+                         access), webdata-notify (failure alerts), webdata-sync, webdata-job daemon
 config.example.env       every setting in /etc/omb-webreports/config.env, explained
 docs/                    user documentation
 examples/reports/        a complete real report to study
 skills/                  Agent Skills for bots, and omb-webreports.openmaus.json (generated
                          OpenMausBot package: the skills + the Report builder preset)
 templates/report/        the starter report webdata-new-report copies
+templates/login.html     the password page webdata-gate shows for a private report
 webroot/                 the shared site files: front page, lib/ (kit), reports/_gallery/
 ```
 
@@ -169,7 +174,7 @@ Your reports, jobs and published data are never in the repository: they live in
 ## Status
 
 A personal project that grew into a platform: tested on one machine
-(Ubuntu 26.04, OpenMausBot 0.1.104), single user, Tailscale. Issues and pull
+(Ubuntu 26.04, OpenMausBot 0.1.107), single user, Tailscale. Issues and pull
 requests welcome.
 
 ## License

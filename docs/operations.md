@@ -13,7 +13,9 @@ webdata-errors --since 1h          # JavaScript errors reported by real browsers
 webdata-new-report <slug> "<Title>" <bot> "<description>"
 webdata-sync --once                # one sync pass now; prints warnings (bad report.json, …)
 webdata-bake <slug>                # re-bake a report's first render now (the service does this itself)
-webdata-job list                   # scheduled jobs: last result, next run (see data-jobs.md)
+webdata-job list                   # scheduled jobs: last result, next run, alerts (see data-jobs.md)
+webdata-notify status              # failure alerts: webhooks per bot, each job's alert state
+webdata-access status              # who can reach the site; each database and report: public or private
 ```
 
 Everything that needs root is one command, `sudo webdata-admin` (bots can't
@@ -51,12 +53,15 @@ log keeps them for `webdata-errors`.
 | What's installed (source, commit) | `/etc/omb-webreports/installed.json` | root |
 | The program (tools, skills, docs, shared site files) | `/usr/local/lib/omb-webreports` | root |
 | The source clone (installs and updates run from it) | `/usr/local/src/omb-webreports` | root |
-| Reports, published data, jobs, state | `/var/lib/omb-webreports` (`DATA_DIR`) | you |
+| Reports, published data, jobs, state, access settings | `/var/lib/omb-webreports` (`DATA_DIR`) | you |
+| The gate's cookie-signing key | `/var/lib/omb-webreports-gate/` | `omb-webreports-gate` |
+| Failure alerts: status, webhook secrets | `/var/lib/omb-webreports-notify/` | root |
 
 ## Settings
 
-- `/etc/omb-webreports/config.env`: owner, content folder, listen address,
-  allowed networks, site URL, paths, OpenMausBot isolation. Edit it as root,
+- `/etc/omb-webreports/config.env`: owner, content folder, Apache's and the
+  gate's ports, the access default (`ACCESS_DEFAULT`), site URL, paths,
+  OpenMausBot isolation. Edit it as root,
   then re-run `sudo /usr/local/src/omb-webreports/admin/install.sh`. The tools read it on
   each run.
 - `DATA_DIR/sync.json` (optional, yours to edit):
@@ -142,6 +147,13 @@ Remote access) and run `sudo webdata-admin skills login --code <code>`.
 **A data job fails.** `webdata-job logs <name>`; see
 [data-jobs.md](data-jobs.md#when-a-job-fails).
 
+**A job keeps failing but no bot was alerted.** `webdata-job list` shows each
+job's `alerts:` line, `webdata-notify status` the detail. Usual reasons: no
+`notify_failure` in its `job.json`; it's a temporary failure still inside
+`notify_after` (12 h by default); it's held because the internet was down or
+most jobs were failing; the last run was manual; or the bot's webhook is
+turned off in OpenMausBot.
+
 ## Upgrades
 
 **omb-webreports:**
@@ -161,7 +173,7 @@ and restarts the services. (Developing omb-webreports itself:
 [development.md](development.md).) The installer ends with `webdata-skills sync`: bots that have the
 omb-webreports skills get the new versions (each stays on or off as it was), and
 the Report builder preset is replaced by the new release. To see what changed
-first: `git -C /usr/local/src/omb-webreports log -p -- skills/`; to preview: `webdata-skills sync --dry-run`.
+first: `git -C /usr/local/src/omb-webreports log -p -- skills/`; to preview: `sudo webdata-admin skills sync --dry-run`.
 
 **Bots' skills, by hand:**
 
@@ -203,6 +215,29 @@ DuckDB engine. If there's none, it names the newest release that has one and
 asks whether to continue; without a terminal it stops (exit 1). Add
 `--skip-browser-check` to upgrade regardless, accepting that reports run a
 different DuckDB until a matching build appears.
+
+## Passwords and the internet
+
+Access belongs to a database: its file, its other files and every report whose
+`report.json` lists it ([setup step 12](setup.md#12-optional-open-it-to-the-internet),
+[architecture](architecture.md#security-model)).
+
+```bash
+webdata-access status                     # reachable from the tailnet or the internet; each database and report
+webdata-access set <db> <<'EOF'           # private with a new password (12+ characters): every device signs in again
+the password
+EOF
+webdata-access public|private|default <db>
+sudo tailscale funnel --bg --https=8443 http://127.0.0.1:8081   # open to the internet
+sudo tailscale funnel --https=8443 off                           # back to the tailnet only
+```
+
+- A forgotten password can't be read back (only a hash is kept): set a new one.
+- To sign a device out, open `SITE_URL/_gate/logout`.
+- Wrong passwords slow down after five tries, per database; `journalctl -u
+  webdata-gate` shows sign-ins and failures (never the passwords).
+- Bots set passwords only when asked, with the password you give them, and
+  never repeat it.
 
 ## Uninstall
 

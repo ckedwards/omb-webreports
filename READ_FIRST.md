@@ -138,11 +138,14 @@ A report directory:
 ```
 
 `title` is required; `short_name` is the home-screen label (≤ ~12 chars);
-`databases` must name files in `DATA/` (without `.duckdb`).
+`databases` must name files in `DATA/` (without `.duckdb`), and **every**
+database the page reads: the first-render bake and who may see the report
+(password access, "Gotchas") both go by this list.
 
 After creating or changing a report, run **`webdata-check <slug>`**.
 It runs a sync pass (warnings for a bad `report.json`, unknown database, …),
-renders the report over HTTPS at iPhone size in light and dark mode, prints
+renders the report at iPhone size in light and dark mode (straight from Apache
+on this machine, so private reports render too), prints
 kit errors, page errors and horizontal overflow, saves `light.png` / `dark.png`,
 and exits 1 on any problem. Then look at both screenshots.
 
@@ -283,8 +286,9 @@ Logs: `journalctl -u webdata-sync -f`. Optional `sync.json` in the folder that h
 (delete an already-published `DATA/<name>.duckdb` by hand). `bake`
 turns baked first renders on or off; `bake_max_kb` skips reports whose first
 render returns more than that.
-Everything served (reports, published data, the shared files) is readable by every
-device on the tailnet.
+Everything served is readable by everyone who can reach the site (the tailnet,
+or the internet when Funnel is on), except private databases and the reports
+that read them, which need their password ("Gotchas").
 
 Generated files (`data/*`, `reports/index.json`, report manifests, PNG icons and `initial.json`)
 are rewritten only when their content changes. Don't edit them by hand.
@@ -303,8 +307,8 @@ are rewritten only when their content changes. Don't edit them by hand.
   right away when a query has no cached or baked result. Keep the template's `<head>`:
   `preconnect` to jsDelivr, `modulepreload` of kit, `defer` on d3/Plot.
 - `GET …/<name>.duckdb.wal 404` in the access log is normal: DuckDB checks for a WAL.
-- No offline mode: kit doesn't use service workers, so home-screen apps need the
-  tailnet to load. (Over the HTTPS URL a report *could* register one; don't
+- No offline mode: kit doesn't use service workers, so home-screen apps need to
+  reach the site to load. (Over the HTTPS URL a report *could* register one; don't
   without asking, since it would fight the ETag freshness model.)
 - The HTTPS proxy is Tailscale config, not Apache: `tailscale serve status`
   (it points at webdata-gate, `127.0.0.1:8081`). Funnel, if on, opens it to the
@@ -359,6 +363,12 @@ in `bin/_notify.mjs`; `webdata-job list` shows each job's alert state,
 `WEBDATA_JOBS_DIR`/`WEBDATA_JOBS_STATE` (and `OMB_DATA_DIR`) to scratch folders:
 the live service watches `JOBS`; tests of webdata-notify also `WEBDATA_NOTIFY_DIR`,
 `OMB_URL` (a throwaway OpenMausBot) and `WEBDATA_OMB_SESSION`.
+A table that can legitimately be empty (no headlines this week) is written as
+`[]` with `"min_rows": 0` on it; an empty result keeps the table's current
+columns. Every request a job makes, and every request made while writing it,
+comes from this machine: fetch a sample once and develop against the saved
+file, cap and cache per-item lookups, and stop when a source rate-limits
+(never work around it).
 The `webdata-data-job` skill is the full procedure. An OpenMausBot *routine* is the
 alternative when collection needs judgment (it re-runs the bot, with AI).
 

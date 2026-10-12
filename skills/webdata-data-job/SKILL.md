@@ -140,6 +140,11 @@ table is produced and passes the checks.
   `import('/usr/lib/node_modules/@duckdb/node-api/lib/index.js')`).
 - Limits in job.json: `timeout_minutes` (default 10), per table `min_rows`
   (default 1).
+- **Nothing to report is not a failure** when the table can legitimately be
+  empty (no headlines this week, no alerts today): write an empty list (`[]`)
+  for it and set that table's `"min_rows": 0`. An empty result keeps the
+  table's current columns, so reports keep working and show their empty
+  state. Keep `min_rows` above 0 wherever empty would mean something broke.
 
 ### 3a. CSV and other files
 

@@ -310,8 +310,19 @@ async function runJob(job, { dryRun = false, trigger = 'manual', echo = false } 
         const reader = ext === 'parquet' ? 'read_parquet' : ext === 'csv' ? 'read_csv_auto' : 'read_json_auto';
         await sc.run(`CREATE TABLE ${q(t)} AS SELECT * FROM ${reader}(${lit(file)})`);
         const [{ n }] = await rows(`SELECT count(*)::INTEGER AS n FROM ${q(t)}`);
-        const cols = await rows(`SELECT column_name AS name, data_type AS type FROM duckdb_columns() WHERE table_name = ${lit(t)} AND database_name = current_database() ORDER BY column_index`);
         if (n < spec.min_rows) throw new Error(`${t}: ${n} rows, fewer than min_rows ${spec.min_rows}; nothing written`);
+        // An empty file ([] or no lines) has no columns of its own: an empty
+        // result (allowed by min_rows 0) keeps the columns the table has now.
+        if (n === 0) {
+          const has = job.bot.snapshot && fs.existsSync(job.bot.snapshot);
+          if (has) await sc.run(`ATTACH ${lit(job.bot.snapshot)} AS cur (READ_ONLY)`);
+          try {
+            const exists = has && (await rows(`SELECT 1 FROM duckdb_tables() WHERE database_name = 'cur' AND schema_name = 'main' AND table_name = ${lit(t)}`)).length > 0;
+            if (!exists) throw new Error(`${t}: no rows, and no current table to take the columns from (the first run needs rows); nothing written`);
+            await sc.run(`CREATE OR REPLACE TABLE ${q(t)} AS SELECT * FROM cur.main.${q(t)} LIMIT 0`);
+          } finally { if (has) await sc.run('DETACH cur'); }
+        }
+        const cols = await rows(`SELECT column_name AS name, data_type AS type FROM duckdb_columns() WHERE table_name = ${lit(t)} AND database_name = current_database() ORDER BY column_index`);
         if (spec.mode === 'upsert') {
           for (const k of spec.key) if (!cols.some((c) => c.name === k)) throw new Error(`${t}: key column "${k}" not in output; nothing written`);
           const keyList = spec.key.map(q).join(', ');
@@ -320,7 +331,7 @@ async function runJob(job, { dryRun = false, trigger = 'manual', echo = false } 
           if (dups || nulls) throw new Error(`${t}: key (${spec.key.join(', ')}) has ${dups} duplicate and ${nulls} null values; nothing written`);
         }
         summary[t] = { rows: n, columns: cols, mode: spec.mode, file: path.basename(file) };
-        log(`staged ${t}: ${n} rows from ${path.basename(file)} (${spec.mode}) · ${cols.map((c) => `${c.name} ${c.type}`).join(', ')}`);
+        log(`staged ${t}: ${n} rows from ${path.basename(file)}${n === 0 ? ', columns from the current table' : ''} (${spec.mode}) · ${cols.map((c) => `${c.name} ${c.type}`).join(', ')}`);
       }
     } finally {
       sc.closeSync(); stage.closeSync();

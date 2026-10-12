@@ -146,6 +146,28 @@ table is produced and passes the checks.
   table's current columns, so reports keep working and show their empty
   state. Keep `min_rows` above 0 wherever empty would mean something broke.
 
+### Be gentle with sources
+
+Every request this job makes, and every request **you** make while writing
+and testing it, comes from this machine. A source that rate-limits or blocks
+it (HTTP 429, a "sorry" or CAPTCHA page) blocks the scheduled job too, and
+anything else here that uses that source, often for hours.
+
+- **While developing**, fetch a sample once, save it (under `/tmp` or the
+  job's folder), and work on the parser against the saved file. Don't
+  re-fetch in a loop to try changes; each dry run fetches again too.
+- **Use the official feed or API** (RSS, a documented JSON endpoint). A
+  site's undocumented internal endpoints (the ones its own pages call, such as
+  Google's `batchexecute`) are rate-limited hard and change without notice.
+- **Requests per item** (resolving each link, opening each detail page) need
+  limits: a cap per run (a few, not one per row), a pause between them, and a
+  cache that survives between runs (a small JSON file in the job's folder),
+  so each item is looked up once, not on every run.
+- **When blocked, stop asking.** On a 429 or a block page, make no more
+  requests to that host in this run; keep what you have if the rows are
+  still good (drop the extra detail), or exit 75. Never work around a block
+  (other user agents, proxies, faster retries).
+
 ### 3a. CSV and other files
 
 Download with `urllib.request` and save to `$WEBDATA_OUT/<table>.csv` only if

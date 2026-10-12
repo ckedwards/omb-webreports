@@ -44,7 +44,7 @@ const RECENT_MS = 2 * 3600_000;
 const READER_MAX_BYTES = 16 * 1024 * 1024;
 const NAME = /^[a-z0-9][a-z0-9-]{0,62}$/;
 
-export const WEBHOOK_NAME = 'omb-webreports job failures';
+const WEBHOOK_NAME = 'omb-webreports job failures';
 const EVENT_FAILED = 'webdata.job.failed';
 const EVENT_TEST = 'webdata.job.test';
 
@@ -403,18 +403,16 @@ function showStatus() {
   }
 }
 
-if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
-  const cmd = process.argv[2];
-  try {
-    if (cmd === 'daemon') await daemon();
-    else if (cmd === 'once') { const { memory, secrets } = setup(); const s = await pass(memory, secrets, stamp()); console.log(JSON.stringify(s, null, 2)); }
-    else if (cmd === 'status') showStatus();
-    else {
-      process.stdout.write(fs.readFileSync(fileURLToPath(import.meta.url), 'utf8').split('\n').slice(1, 6).map((l) => l.replace(/^\/\/ ?/, '')).join('\n') + '\n');
-      process.exit(cmd ? 2 : 0);
-    }
-  } catch (e) {
-    console.error(e.message);
-    process.exit(1);
+const cmd = process.argv[2];
+try {
+  if (cmd === 'daemon') await daemon();
+  else if (cmd === 'once') { const { memory, secrets } = setup(); const s = await pass(memory, secrets, stamp()); console.log(JSON.stringify(s, null, 2)); }
+  else if (cmd === 'status') showStatus();
+  else {
+    process.stdout.write(fs.readFileSync(fileURLToPath(import.meta.url), 'utf8').split('\n').slice(1, 6).map((l) => l.replace(/^\/\/ ?/, '')).join('\n') + '\n');
+    process.exit(cmd ? 2 : 0);
   }
+} catch (e) {
+  console.error(e.message);
+  process.exit(1);
 }

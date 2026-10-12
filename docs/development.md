@@ -60,6 +60,6 @@ with `OMB_WEBREPORTS_CONFIG=/tmp/omb-test/etc/omb-webreports/config.env` plus
 
 ## Releasing
 
-Commit and push; production machines then run `sudo …/admin/update.sh` (or
+Commit and push; production machines then run `sudo webdata-admin update` (or
 `--ref <tag>`). After editing `skills/`, run `bin/webdata-skills package` and
 commit the regenerated package with the skills.

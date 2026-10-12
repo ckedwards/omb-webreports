@@ -245,5 +245,5 @@ journalctl -u "$SERVICE" -n 5 --no-pager
 if [[ -x $PREFIX/bin/webdata-skills ]]; then
   echo
   echo "bots' skills (webdata-skills sync):"
-  "$PREFIX/bin/webdata-skills" sync 2>&1 | sed 's/^/  /' || echo "warning: couldn't update the bots' skills; run: sudo webdata-skills sync" >&2
+  "$PREFIX/bin/webdata-skills" sync 2>&1 | sed 's/^/  /' || echo "warning: couldn't update the bots' skills; run: sudo webdata-admin skills sync" >&2
 fi

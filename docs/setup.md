@@ -247,8 +247,8 @@ Settings live in `/etc/omb-webreports/config.env`: edit it as root, then
 re-run `sudo /usr/local/src/omb-webreports/admin/install.sh`. To update:
 
 ```bash
-sudo /usr/local/src/omb-webreports/admin/update.sh              # newest on the clone's branch
-sudo /usr/local/src/omb-webreports/admin/update.sh --ref v1.2.0 # a tag, branch or commit
+sudo webdata-admin update               # newest on the clone's branch
+sudo webdata-admin update --ref v1.2.0  # a tag, branch or commit
 ```
 
 It refuses if the clone isn't root-owned or has local changes, fast-forwards
@@ -272,7 +272,7 @@ import that file in the app yourself, or its GitHub link.
 **An existing bot:**
 
 ```bash
-sudo webdata-skills add Bramble     # the bot's name; adds the four skills, switched on
+sudo webdata-admin skills add Bramble     # the bot's name; adds the four skills, switched on
 ```
 
 **Or by chat**, with OpenMausBot's `/learn` (you confirm each skill in the app):
@@ -289,7 +289,7 @@ However a bot got them, **updates are automatic**: `admin/update.sh` (through
 the installer) and `admin/openmausbot-upgrade.sh` finish with `webdata-skills
 sync`, which replaces outdated copies in every bot that has them (keeping each
 skill on or off as it was) and swaps in the new release of the preset.
-`sudo webdata-skills status` shows which bots have the skills and whether
+`sudo webdata-admin skills status` shows which bots have the skills and whether
 they're current (`sudo` because, with OpenMausBot isolated, it uses a root-only
 session).
 

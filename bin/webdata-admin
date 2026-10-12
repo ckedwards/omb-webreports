@@ -1,0 +1,120 @@
+#!/usr/bin/env bash
+# webdata-admin: everything omb-webreports needs root for, in one place. Run it
+# with sudo; bots run as the owner and can't use sudo, so they can't run it.
+#
+#   sudo webdata-admin status                      install and updates, versions, services, isolation,
+#                                                  bots' skills, failure alerts
+#   sudo webdata-admin update [--ref X]            git pull the root-owned clone, install, sync skills
+#   sudo webdata-admin upgrade-openmausbot [VERSION] [--check] [--skip-browser-check]
+#                                                  OpenMausBot, its native modules, the browser's DuckDB
+#   sudo webdata-admin pair [--label NAME] [--chat-only]
+#                                                  a pairing code for a new device (full access unless --chat-only)
+#   sudo webdata-admin skills status|add <bot>...|sync [--dry-run]|login [--code C]|logout
+#                                                  the bots' omb-webreports skills (webdata-skills)
+#
+# update and upgrade-openmausbot run the scripts in the root-owned clone the
+# install came from (/etc/omb-webreports/installed.json; normally
+# /usr/local/src/omb-webreports), and refuse one that anyone but root can
+# write. There is no unsafe mode here: development installs stay explicit,
+#   sudo ~/repos/omb-webreports/admin/update.sh --from-unsafe-dev
+set -euo pipefail
+
+BIN=$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")" && pwd)
+NODE=$(command -v node || echo /usr/bin/node)
+INSTALLED=/etc/omb-webreports/installed.json
+DEFAULT_SRC=/usr/local/src/omb-webreports
+
+die() { echo "error: $*" >&2; exit 1; }
+usage() { sed -n '2,/^set -euo/p' "${BASH_SOURCE[0]}" | sed -e '/^set -euo/d' -e 's/^# \{0,1\}//'; }
+
+# A directory root can run code from: it, everything in it and every directory
+# above it owned by root and writable by nobody else (as admin/_lib.sh's
+# check_source; that file lives in the clone, so it can't vouch for the clone).
+root_only() {
+  local d=$1 uid gid perm
+  [[ -d $d ]] || { echo "$d doesn't exist"; return 1; }
+  while :; do
+    read -r uid gid perm < <(stat -c '%u %g %a' "$d")
+    [[ $uid == 0 ]] || { echo "$d is owned by $(stat -c %U "$d")"; return 1; }
+    if (( 8#$perm & 8#020 )) && [[ $gid != 0 ]]; then echo "$d is writable by group $(stat -c %G "$d")"; return 1; fi
+    if (( 8#$perm & 8#002 )) && ! (( 8#$perm & 8#1000 )); then echo "$d is writable by everyone"; return 1; fi
+    [[ $d == / ]] && break
+    d=$(dirname "$d")
+  done
+  local bad
+  bad=$(find "$1" \( ! -uid 0 -o \( ! -type l -perm /002 \) -o \( ! -type l ! -gid 0 -perm /020 \) \) -print -quit 2>/dev/null || true)
+  [[ -z $bad ]] || { echo "$bad is $(stat -c '%U:%G %A' "$bad")"; return 1; }
+}
+
+# The clone to run admin scripts from: the one the install came from, if it's root-only.
+source_clone() {
+  local src="" why
+  [[ -f $INSTALLED ]] && src=$("$NODE" -p "require('$INSTALLED').source || ''" 2>/dev/null || true)
+  if [[ -n $src ]] && why=$(root_only "$src"); then echo "$src"; return; fi
+  if [[ -n $src && $src != "$DEFAULT_SRC" ]]; then
+    echo "note: the last install came from $src, which isn't root-only ($why); using $DEFAULT_SRC" >&2
+  fi
+  why=$(root_only "$DEFAULT_SRC") || die "no root-owned clone to run from: $why.
+  Make one: sudo git clone https://github.com/ckedwards/omb-webreports $DEFAULT_SRC
+  (Development installs: sudo <checkout>/admin/update.sh --from-unsafe-dev)"
+  echo "$DEFAULT_SRC"
+}
+
+cmd=${1:-}
+[[ -n $cmd ]] && shift
+case $cmd in ''|-h|--help|help) usage; exit 0 ;; esac
+(( EUID == 0 )) || die "webdata-admin needs root: sudo webdata-admin $cmd${*:+ $*}"
+
+case $cmd in
+  update)
+    src=$(source_clone)
+    for a in "$@"; do [[ $a == --from-unsafe-dev ]] && die "webdata-admin has no unsafe mode; for a development checkout run its own admin/update.sh --from-unsafe-dev"; done
+    exec bash "$src/admin/update.sh" "$@"
+    ;;
+  upgrade-openmausbot)
+    src=$(source_clone)
+    for a in "$@"; do [[ $a == --from-unsafe-dev ]] && die "webdata-admin has no unsafe mode"; done
+    exec bash "$src/admin/openmausbot-upgrade.sh" "$@"
+    ;;
+  pair)
+    exec "$NODE" "$BIN/_admin-pair.mjs" "$@"
+    ;;
+  skills)
+    [[ ${1:-} == package ]] && die "package is a development command: bin/webdata-skills package in your checkout"
+    [[ ${1:-} == keepalive ]] && die "keepalive is the webdata-omb-session timer's job"
+    exec "$NODE" "$BIN/webdata-skills" "$@"
+    ;;
+  status)
+    echo "install"
+    if [[ -f $INSTALLED ]]; then
+      "$NODE" -e '
+        const i = require(process.argv[1]);
+        const when = (i.at || "").slice(0, 16).replace("T", " ");
+        console.log(`  from     ${i.source} @ ${(i.commit || "?").slice(0, 12)}${i.ref ? ` (${i.ref})` : ""}, ${when} UTC${i.unsafe ? "  UNSAFE: a development checkout" : ""}`);
+      ' "$INSTALLED"
+    else
+      echo "  not installed (no $INSTALLED)"
+    fi
+    if src=$(source_clone 2>/dev/null) && branch=$(git -C "$src" symbolic-ref -q --short HEAD); then
+      here=$(git -C "$src" rev-parse HEAD)
+      if there=$(timeout 20 git -C "$src" ls-remote --exit-code origin "refs/heads/$branch" 2>/dev/null | cut -f1) && [[ -n $there ]]; then
+        if [[ $there == "$here" ]]; then echo "  updates  none: $src matches origin/$branch"
+        else echo "  updates  origin/$branch has ${there:0:12} (the clone is at ${here:0:12}): sudo webdata-admin update"; fi
+      else
+        echo "  updates  couldn't reach origin to check"
+      fi
+    fi
+    echo
+    "$BIN/webdata-info" | sed -n '/^versions/,$p'
+    echo
+    echo "bots' skills"
+    "$NODE" "$BIN/webdata-skills" status 2>&1 | sed 's/^/  /' || true
+    echo
+    "$NODE" "$BIN/webdata-notify" status 2>&1 | sed 's/^/  /' || true
+    ;;
+  *)
+    echo "unknown command: $cmd" >&2
+    usage >&2
+    exit 2
+    ;;
+esac

@@ -93,7 +93,7 @@ sudo admin/openmausbot-upgrade.sh    # OpenMausBot + native modules + matching b
 tailscale serve --bg --https=8443 http://$(tailscale ip -4):8080   # HTTPS for phones
 sudo admin/install.sh                # asks a few questions; Apache, services, tools on PATH
 webdata-info                         # locations, URL, versions, service status
-# later: sudo admin/update.sh        # git pull + install
+# later: sudo webdata-admin update   # git pull + install (sudo webdata-admin: every root task)
 ```
 
 The source is cloned **as root** on purpose: root runs the installer and the
@@ -126,7 +126,7 @@ From a shell:
 | `webdata-bake <slug>` | re-bake a report's first render now (automatic after changes) |
 | `webdata-job list\|run\|logs\|enable\|disable` | scheduled data jobs |
 | `webdata-browse <url> --eval '<js>'` | headless Chrome for job scripts |
-| `sudo webdata-skills status\|add\|sync` | bots' copies of the skills: which bots, current or outdated, update them |
+| `sudo webdata-admin status\|update\|pair\|skills\|upgrade-openmausbot` | everything that needs root: install and update status, updating, pairing a new device, the bots' skills, upgrading OpenMausBot |
 
 ## Documentation
 
@@ -147,7 +147,7 @@ From a shell:
 ```
 admin/install.sh         installs (as root, from a root-owned clone): the program to
                          /usr/local/lib/omb-webreports, settings, content folder, Apache, services
-admin/update.sh          git pull + install; --from-unsafe-dev for a development checkout
+admin/update.sh          git pull + install (sudo webdata-admin update); --from-unsafe-dev for a development checkout
 admin/openmausbot-upgrade.sh  install/upgrade OpenMausBot + its native modules; keeps the
                          browser's DuckDB (DuckDB-WASM) on the same version as OpenMausBot's
 bin/                     the webdata-* tools

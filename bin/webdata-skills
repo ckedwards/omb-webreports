@@ -240,7 +240,7 @@ async function login() {
   }
   if (!code) {
     const how = 'in the OpenMausBot app, Settings → Remote access, create a full-access pairing code';
-    if (!process.stdin.isTTY) throw new OmbError(`OpenMausBot is isolated, so it needs a pairing code: ${how}, then run: sudo webdata-skills login --code <code>`);
+    if (!process.stdin.isTTY) throw new OmbError(`OpenMausBot is isolated, so it needs a pairing code: ${how}, then run: sudo webdata-admin skills login --code <code>`);
     const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
     code = await rl.question(`OpenMausBot is isolated, so ${how} and enter it here: `);
     rl.close();

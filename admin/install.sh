@@ -3,7 +3,8 @@
 #
 #   sudo git clone https://github.com/ckedwards/omb-webreports /usr/local/src/omb-webreports
 #   sudo /usr/local/src/omb-webreports/admin/install.sh     first install asks a few questions
-#   sudo /usr/local/src/omb-webreports/admin/update.sh      later: git pull, then this
+#   sudo webdata-admin update                               later: git pull, then this
+#                                                           (= sudo /usr/local/src/omb-webreports/admin/update.sh)
 #
 # Options:
 #   --print              show every system file it would write; change nothing
@@ -51,7 +52,7 @@ PREFIX=/usr/local/lib/omb-webreports
 CONF_DIR=/etc/omb-webreports
 CONFIG=$CONF_DIR/config.env
 LOOPBACK_DROPIN=/etc/systemd/system/openmausbot.service.d/omb-webreports-loopback.conf
-TOOLS=(webdata-info webdata-ls webdata-sql webdata-check webdata-new-report webdata-job webdata-browse webdata-errors webdata-sync webdata-bake webdata-skills webdata-notify)
+TOOLS=(webdata-info webdata-ls webdata-sql webdata-check webdata-new-report webdata-job webdata-browse webdata-errors webdata-sync webdata-bake webdata-skills webdata-notify webdata-admin)
 NODE=$(command -v node || true)
 [[ -n $NODE ]] || die "node not found (Node.js 20+ is required; see docs/setup.md)"
 asowner() { if (( TEST )); then "$@"; else runuser -u "$WEBREPORTS_OWNER" -- "$@"; fi; }
@@ -574,7 +575,7 @@ if systemctl cat openmausbot.service >/dev/null 2>&1; then
     # webdata-skills' own session first: while OpenMausBot still trusts local
     # requests (before the restart below), it mints the pairing code itself.
     omb_up && "$NODE" "$PREFIX/bin/webdata-skills" login 2>&1 | sed 's/^/  /' \
-      || warn "webdata-skills has no OpenMausBot session: create a full-access pairing code in the app (Settings → Remote access), then: sudo webdata-skills login --code <code>"
+      || warn "webdata-skills has no OpenMausBot session: create a full-access pairing code in the app (Settings → Remote access), then: sudo webdata-admin skills login --code <code>"
   fi
   if [[ $dropin_before != "$dropin_after" ]]; then
     systemctl daemon-reload
@@ -608,7 +609,7 @@ if systemctl is-active --quiet openmausbot.service; then
   echo
   echo "bots' skills (webdata-skills sync):"
   "$NODE" "$PREFIX/bin/webdata-skills" sync 2>&1 | sed 's/^/  /' \
-    || warn "couldn't update the bots' skills; run: sudo webdata-skills sync"
+    || warn "couldn't update the bots' skills; run: sudo webdata-admin skills sync"
 fi
 
 echo
@@ -616,7 +617,7 @@ echo "omb-webreports is installed$( (( UNSAFE )) && echo ' (UNSAFE: from a devel
 echo "  program  $PREFIX  (from $SRC${commit:+ @ ${commit:0:12}})"
 echo "  content  $DATA_DIR"
 echo "  on       http://$LISTEN_IP:$LISTEN_PORT/  (site URL: $SITE_URL)"
-echo "  check    webdata-info"
+echo "  check    webdata-info; as root: sudo webdata-admin status"
 if [[ -n $MIGRATE ]]; then
   echo "  migrated from $MIGRATE: once the site looks right, delete that folder (its services now run from $PREFIX)"
 fi

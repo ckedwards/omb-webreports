@@ -260,15 +260,16 @@ notifications) is unaffected.
 - `webdata-skills` then uses **its own full-access OpenMausBot session**,
   stored in `/etc/omb-webreports/omb-session.json`, readable only by root. Bots
   run as you and can't use `sudo` without your password, so they can't read it;
-  the admin scripts run as root, and you run `sudo webdata-skills …`.
+  the admin scripts run as root, and you run `sudo webdata-admin skills …`.
 - The installer creates the session before switching (while OpenMausBot still
-  mints pairing codes for local requests). Later, `sudo webdata-skills login`
+  mints pairing codes for local requests). Later, `sudo webdata-admin skills login`
   needs a code from the app (Settings → Remote access).
 - OpenMausBot ends a session after 30 days without use and after 180 days in
   any case, so the `webdata-omb-session.timer` (root, daily) uses it to renew it
   and swaps it for a new one every 30 days, revoking the old one.
 - Side effect: OpenMausBot's own CLI can no longer pair devices or list
-  sessions (`openmausbot pair` explains why); do that in the app instead.
+  sessions (`openmausbot pair` explains why); pair in the app or with
+  `sudo webdata-admin pair`, which uses that session.
 - Not closed by this (OpenMausBot's own notes): a local caller can still post a
   message into any bot's thread through the guarded route.
 

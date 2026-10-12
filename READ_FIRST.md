@@ -45,6 +45,7 @@ DOCS/                      read-only
 │   ├── webdata-errors     JavaScript errors reported by real browsers/phones (lib/report-errors.js)
 │   ├── webdata-job        scheduled data jobs: new / run / list / logs / enable / notify-test
 │   ├── webdata-notify     failure alerts (a root service): status
+│   ├── webdata-admin      for people, with sudo: status / update / pair / skills (bots can't run it)
 │   ├── webdata-browse     headless Chrome for job scripts: render a page, return HTML/text/JS result
 │   ├── webdata-sync       snapshots, catalog, report index (runs as a service)
 │   └── webdata-bake       bakes each report's first render (run by webdata-sync)
@@ -307,7 +308,7 @@ are rewritten only when their content changes. Don't edit them by hand.
 - The HTTPS proxy is Tailscale config, not Apache: `tailscale serve status`;
   remove with `tailscale serve --https=8443 off`.
 - omb-webreports itself (DOCS, `/lib/`, the gallery, the tools) is installed and
-  updated by a person, as root, from its repository (`admin/update.sh`); bots
+  updated by a person, as root, from its repository (`sudo webdata-admin update`); bots
   can't change it.
 
 ## Scheduled data jobs
@@ -363,12 +364,12 @@ repository (a person's development checkout, then an install):
 
 ```bash
 bin/webdata-skills package     # in the checkout: regenerate skills/omb-webreports.openmaus.json
-sudo webdata-skills sync       # update every bot's outdated copy (on/off kept) and the preset
+sudo webdata-admin skills sync # update every bot's outdated copy (on/off kept) and the preset
 ```
 
 `admin/install.sh` and `admin/update.sh` run that sync themselves.
 
-`sudo webdata-skills status` shows each bot's copies (`sudo`: OpenMausBot is
+`sudo webdata-admin skills status` shows each bot's copies (`sudo`: OpenMausBot is
 isolated from local programs, bots included, and webdata-skills uses a root-only
 session; a bot can't run these, a person does). The package is generated: never
 edit it by hand. Skills contain no machine paths (they run `webdata-info`).

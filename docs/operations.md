@@ -14,7 +14,17 @@ webdata-new-report <slug> "<Title>" <bot> "<description>"
 webdata-sync --once                # one sync pass now; prints warnings (bad report.json, …)
 webdata-bake <slug>                # re-bake a report's first render now (the service does this itself)
 webdata-job list                   # scheduled jobs: last result, next run (see data-jobs.md)
-sudo webdata-skills status         # bots with the omb-webreports skills: current or outdated
+```
+
+Everything that needs root is one command, `sudo webdata-admin` (bots can't
+use sudo, so they can't run it):
+
+```bash
+sudo webdata-admin status          # install + available update, versions, services, isolation, bots' skills, failure alerts
+sudo webdata-admin update          # update omb-webreports (below)
+sudo webdata-admin pair            # a pairing code for a new browser or device (full access; --chat-only)
+sudo webdata-admin skills status   # bots with the omb-webreports skills: current or outdated
+sudo webdata-admin upgrade-openmausbot --check
 ```
 
 ## Services and logs
@@ -96,14 +106,14 @@ lost read access to `DATA_DIR` (its ACLs): re-run
 
 **`engine_unavailable` / DuckDB did not load** (in OpenMausBot, or the
 tools fail to import `@duckdb/node-api`). The native modules are missing or
-don't match the OpenMausBot release: `sudo /usr/local/src/omb-webreports/admin/openmausbot-upgrade.sh`
+don't match the OpenMausBot release: `sudo webdata-admin upgrade-openmausbot`
 (see [setup step 3](setup.md#3-openmausbot-and-its-native-modules)).
 
 **A query works in `webdata-sql` but fails in the browser (or the other way
 round), or reports show a DuckDB error after an upgrade.** The browser's DuckDB
 may not match OpenMausBot's. `webdata-info` shows both ("browser DuckDB");
-`admin/openmausbot-upgrade.sh --check` checks them properly. To realign, re-run
-`sudo admin/openmausbot-upgrade.sh <installed openmausbot version>` (in the source clone): it re-pins
+`sudo webdata-admin upgrade-openmausbot --check` checks them properly. To realign, re-run
+`sudo webdata-admin upgrade-openmausbot <installed openmausbot version>`: it re-pins
 `DUCKDB_WASM_VERSION` and restarts sync, which re-stamps every page. If no
 matching browser build exists yet (an upgrade made with `--skip-browser-check`),
 either go back to the release the check names, or wait for a DuckDB-WASM build
@@ -111,13 +121,19 @@ and re-run. Snapshots use storage format v1.2.0, which every DuckDB since 1.2
 reads, so a lagging browser can still open them.
 
 **`openmausbot pair` refuses ("does not treat commands on this computer as its
-owner").** Expected with isolation: pair devices in the app, Settings → Remote
-access.
+owner").** Expected with isolation. Pair from a device that's already signed
+in (Settings → Remote access), or run `sudo webdata-admin pair`: it prints a
+code and the link to OpenMausBot's `/pair` page. The new device gets full
+access; `--chat-only` gives one that can chat, read threads, answer approval
+cards and manage routines, but can't change bots, settings, keys, devices or
+webhooks. Answering approval cards still lets it OK what a bot does, so give
+it only to someone you'd trust with that. `--label NAME` names the device.
 
 **`webdata-skills` says the session expired, or there is none.** The daily
 timer keeps it alive; if OpenMausBot was down for weeks or the session was
 revoked in the app, create a full-access pairing code in the app (Settings →
-Remote access) and run `sudo webdata-skills login --code <code>`.
+Remote access) and run `sudo webdata-admin skills login --code <code>`.
+(`webdata-admin pair` can't help here: it makes codes with that same session.)
 
 **A data job fails.** `webdata-job logs <name>`; see
 [data-jobs.md](data-jobs.md#when-a-job-fails).
@@ -127,9 +143,13 @@ Remote access) and run `sudo webdata-skills login --code <code>`.
 **omb-webreports:**
 
 ```bash
-sudo /usr/local/src/omb-webreports/admin/update.sh               # fast-forward the clone's branch, then install
-sudo /usr/local/src/omb-webreports/admin/update.sh --ref v1.2.0  # or a tag, branch or commit
+sudo webdata-admin update               # fast-forward the clone's branch, then install
+sudo webdata-admin update --ref v1.2.0  # or a tag, branch or commit
 ```
+
+(`webdata-admin update` runs `admin/update.sh` in the root-owned clone the
+install came from, `/usr/local/src/omb-webreports`; running that script
+directly does the same.)
 
 It refuses if the clone isn't root-owned or has local changes, then runs the
 new installer, which copies the program to `/usr/local/lib/omb-webreports`
@@ -139,12 +159,12 @@ omb-webreports skills get the new versions (each stays on or off as it was), and
 the Report builder preset is replaced by the new release. To see what changed
 first: `git -C /usr/local/src/omb-webreports log -p -- skills/`; to preview: `webdata-skills sync --dry-run`.
 
-**Bots' skills, by hand** (with `sudo` when OpenMausBot is isolated, the default):
+**Bots' skills, by hand:**
 
 ```bash
-sudo webdata-skills status          # each bot: which skills, current or outdated, on/off
-sudo webdata-skills add <bot>       # give a bot the four skills (switched on)
-sudo webdata-skills sync [--dry-run]  # update outdated copies + the preset
+sudo webdata-admin skills status          # each bot: which skills, current or outdated, on/off
+sudo webdata-admin skills add <bot>       # give a bot the four skills (switched on)
+sudo webdata-admin skills sync [--dry-run]  # update outdated copies + the preset
 ```
 
 They use OpenMausBot's API on this machine (`OMB_URL`, default
@@ -156,9 +176,9 @@ isolation (`OMB_LOOPBACK_TRUST=owner`) no session or `sudo` is needed.
 it's on and whether webdata-skills has its session.
 
 ```bash
-sudo webdata-skills login               # new session (needs a code from the app once isolated)
-sudo webdata-skills login --code <code> # the same, non-interactively
-sudo webdata-skills logout              # revoke it
+sudo webdata-admin skills login               # new session (needs a pairing code once isolated)
+sudo webdata-admin skills login --code <code> # the same, non-interactively
+sudo webdata-admin skills logout              # revoke it
 systemctl list-timers webdata-omb-session.timer   # the daily renewal; journalctl -u webdata-omb-session
 ```
 
@@ -169,10 +189,9 @@ To turn isolation off: `OMB_LOOPBACK_TRUST=owner` (or empty) in
 browser's DuckDB match:
 
 ```bash
-cd /usr/local/src/omb-webreports
-admin/openmausbot-upgrade.sh --check            # versions, match, newest release with a match
-sudo admin/openmausbot-upgrade.sh               # latest
-sudo admin/openmausbot-upgrade.sh 0.1.107       # or a specific version (also rolls back)
+sudo webdata-admin upgrade-openmausbot --check     # versions, match, newest release with a match
+sudo webdata-admin upgrade-openmausbot             # latest
+sudo webdata-admin upgrade-openmausbot 0.1.107     # or a specific version (also rolls back)
 ```
 
 Before changing anything it looks for the DuckDB-WASM build with the target's
@@ -184,7 +203,7 @@ different DuckDB until a matching build appears.
 ## Uninstall
 
 ```bash
-sudo webdata-skills logout                        # revoke its OpenMausBot session
+sudo webdata-admin skills logout                  # revoke its OpenMausBot session
 sudo systemctl disable --now webdata-sync webdata-jobs webdata-notify webdata-omb-session.timer
 sudo rm /etc/systemd/system/webdata-{sync,jobs,notify}.service /etc/systemd/system/webdata-omb-session.{service,timer}
 sudo rm -r /var/lib/omb-webreports-notify          # then delete the "omb-webreports job failures" webhooks in OpenMausBot

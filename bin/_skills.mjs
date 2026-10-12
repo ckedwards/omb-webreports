@@ -193,9 +193,9 @@ export async function omb(method, apiPath, body, { token = sessionToken(), auth 
   try { data = text ? JSON.parse(text) : null; } catch { /* not JSON */ }
   if (r.status === 401 || r.status === 403) {
     const err = new OmbError(`OpenMausBot refused ${method} ${apiPath} (${r.status}): ${data?.error ?? 'not allowed'}. ` +
-      (token ? 'The saved session has expired or was revoked: sudo webdata-skills login'
+      (token ? 'The saved session has expired or was revoked: sudo webdata-admin skills login'
         : sessionUnreadable() ? `OpenMausBot is isolated; this needs its session (${SESSION_FILE}, root only): run it with sudo`
-        : 'OpenMausBot is isolated (OMB_LOOPBACK_TRUST=service) and there is no saved session: sudo webdata-skills login'));
+        : 'OpenMausBot is isolated (OMB_LOOPBACK_TRUST=service) and there is no saved session: sudo webdata-admin skills login'));
     err.status = r.status;
     throw err;
   }

@@ -9,7 +9,7 @@ people) making or changing reports. Read it all before writing anything.
 
 | Name | What | You |
 |---|---|---|
-| `SITE` | the URL people open, usually `https://<machine>.<tailnet>.ts.net:8443` | use it for every link |
+| `SITE` | the URL people open: `https://<name>.<tailnet>.ts.net` or `https://<machine>.<tailnet>.ts.net:8443` | use it for every link |
 | `REPORTS` | your reports: `REPORTS/<slug>/` is served at `SITE/reports/<slug>/` | write here |
 | `JOBS` | scheduled data jobs: `JOBS/<name>/job.json` + `run.py` | write here |
 | `DATA` | published databases (`<name>.duckdb`) and `catalog.json`, served at `SITE/data/` | generated: read |
@@ -45,7 +45,7 @@ DOCS/                      read-only
 │   ├── webdata-errors     JavaScript errors reported by real browsers/phones (lib/report-errors.js)
 │   ├── webdata-job        scheduled data jobs: new / run / list / logs / enable / notify-test
 │   ├── webdata-notify     failure alerts (a root service): status
-│   ├── webdata-admin      for people, with sudo: status / update / pair / skills (bots can't run it)
+│   ├── webdata-admin      for people, with sudo: status / update / pair / skills / site (bots can't run it)
 │   ├── webdata-access     who can see each database and its reports: status / set / public / private
 │   ├── webdata-browse     headless Chrome for job scripts: render a page, return HTML/text/JS result
 │   ├── webdata-sync       snapshots, catalog, report index (runs as a service)
@@ -310,9 +310,10 @@ are rewritten only when their content changes. Don't edit them by hand.
 - No offline mode: kit doesn't use service workers, so home-screen apps need to
   reach the site to load. (Over the HTTPS URL a report *could* register one; don't
   without asking, since it would fight the ETag freshness model.)
-- The HTTPS proxy is Tailscale config, not Apache: `tailscale serve status`
-  (it points at webdata-gate, `127.0.0.1:8081`). Funnel, if on, opens it to the
-  internet: `webdata-access status` says which.
+- The HTTPS address is Tailscale config, not Apache: the machine's
+  `tailscale serve` (to webdata-gate, `127.0.0.1:8081`) or the site's own
+  Tailscale node (to the gate's socket). Funnel, if on, opens it to the
+  internet: `webdata-access status` lists the addresses and says which.
 - **Who can see what.** Access belongs to a database: `webdata-access set
   <db>` (password on stdin) makes its file, its other files and every report
   whose `report.json` lists it private; `public`, `private`, `default` change

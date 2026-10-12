@@ -1,7 +1,8 @@
 #!/usr/bin/env node
 // webdata-gate: the site's front door (webdata-gate.service, as the
 // omb-webreports-gate user). tailscale serve (and Funnel, when it's on) send
-// every request here; Apache serves the files on 127.0.0.1 only.
+// every request here, on 127.0.0.1:GATE_PORT or, from the site's own Tailscale
+// node, on GATE_SOCKET; Apache serves the files on 127.0.0.1 only.
 //
 // Each request is let through only if every database it reveals is public, or
 // the visitor has that database's cookie (bin/_access.mjs):
@@ -25,7 +26,7 @@ import fs from 'node:fs';
 import http from 'node:http';
 import path from 'node:path';
 
-import { ROOT, LOCAL_URL, GATE_PORT, SITE_URL, ACCESS_DEFAULT } from './_config.mjs';
+import { ROOT, LOCAL_URL, GATE_PORT, GATE_SOCKET, SITE_URL, ACCESS_DEFAULT } from './_config.mjs';
 import { accessOf, reportDatabases, verifyPassword, cookieName, makeToken, tokenValid, NAME, COOKIE_DAYS } from './_access.mjs';
 
 const APACHE = new URL(process.env.WEBDATA_GATE_UPSTREAM || LOCAL_URL);
@@ -212,8 +213,9 @@ function logout(req, res) {
 function upstreamHeaders(req) {
   const h = { ...req.headers };
   for (const k of [...HOP, 'cookie']) delete h[k];
-  const xff = req.headers['x-forwarded-for'];
-  h['x-forwarded-for'] = xff ? `${xff}, ${req.socket.remoteAddress}` : req.socket.remoteAddress;
+  // A Unix socket has no remote address: the proxy in front already named the visitor.
+  const xff = [req.headers['x-forwarded-for'], req.socket.remoteAddress].filter(Boolean).join(', ');
+  if (xff) h['x-forwarded-for'] = xff; else delete h['x-forwarded-for'];
   return h;
 }
 
@@ -281,13 +283,27 @@ async function handle(req, res) {
   return proxy(req, res, p, search, isPrivate);
 }
 
-const server = http.createServer((req, res) => {
+const app = (req, res) => {
   handle(req, res).catch((e) => {
     if (!(e instanceof HttpError)) log(`error: ${e.stack || e}`);
     if (!res.headersSent) send(res, e.status || 500, 'text/plain', `${e.status ? e.message : 'error'}\n`);
   });
-});
-server.requestTimeout = 30_000;
-server.headersTimeout = 15_000;
-server.keepAliveTimeout = 5_000;
-server.listen(PORT, '127.0.0.1', () => log(`webdata-gate on 127.0.0.1:${PORT} → Apache ${APACHE.host}; databases without a setting are ${ACCESS_DEFAULT}`));
+};
+function listen(server, where, ...args) {
+  server.requestTimeout = 30_000;
+  server.headersTimeout = 15_000;
+  server.keepAliveTimeout = 5_000;
+  server.listen(...args, () => log(`webdata-gate on ${where} → Apache ${APACHE.host}; databases without a setting are ${ACCESS_DEFAULT}`));
+}
+listen(http.createServer(app), `127.0.0.1:${PORT}`, PORT, '127.0.0.1');
+// Also on a Unix socket, for the site's own Tailscale node, which may not
+// connect to this machine's loopback (webdata-tailscale.service). Its directory
+// is the service's RuntimeDirectory: without it (a development run), only the
+// port. The socket is no more than the port, which every local user can reach,
+// so it's open to all.
+if (fs.existsSync(path.dirname(GATE_SOCKET))) {
+  fs.rmSync(GATE_SOCKET, { force: true });
+  const s = http.createServer(app);
+  s.on('listening', () => fs.chmodSync(GATE_SOCKET, 0o666));
+  listen(s, GATE_SOCKET, GATE_SOCKET);
+}

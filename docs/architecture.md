@@ -16,7 +16,7 @@ flowchart TB
         gate["webdata-gate<br/>password access"]
         notify["webdata-notify.service<br/>failure alerts (root)"]
     end
-    ts["tailscale serve (tailnet)<br/>or Funnel (internet), HTTPS"]
+    ts["tailscale serve (tailnet)<br/>or Funnel (internet), HTTPS<br/>the machine's or the site's own node"]
     client["Phone / browser<br/>report + kit.js + DuckDB-WASM"]
     cdn["jsDelivr"]
 
@@ -275,6 +275,18 @@ password, so it fails closed).
   per database, and one check at a time. tailscale serve and Funnel send
   everyone from 127.0.0.1, so there's no per-visitor address to limit by;
   that's why passwords need 12+ characters.
+- **The site's own Tailscale node** (optional, `webdata-admin site login`):
+  a second `tailscaled` (`webdata-tailscale.service`) in userspace mode, as
+  its own user (`omb-webreports-tailscale`), so the site has its own name and
+  Funnel never opens what else the machine serves. In userspace mode tailscaled
+  hands a tailnet peer's connection to any port it doesn't serve to
+  `127.0.0.1` on that port, which would let any tailnet device past the gate
+  to Apache (private databases) and to OpenMausBot as a local caller. So the
+  unit can't reach loopback at all (`IPAddressDeny=localhost`, enforced by the
+  kernel), serves only the gate's Unix socket
+  (`/run/omb-webreports-gate/gate.sock`, no more than its port), and gets the
+  real DNS servers instead of systemd-resolved's `127.0.0.53`. It has no
+  capabilities, a read-only system and no home directories.
 - The gate's unit: its own system user, read access only to `reports/` (it
   opens each `report.json`) and `access/` (ACLs), localhost only, read-only system, no
   capabilities. The tools on this machine (`webdata-check`, the bake) use

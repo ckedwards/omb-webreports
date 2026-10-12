@@ -22,7 +22,7 @@ import crypto from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
 
-import { ACCESS_DIR, ACCESS_DEFAULT, REPORTS_DIR, GATE_PORT } from './_config.mjs';
+import { ACCESS_DIR, ACCESS_DEFAULT, REPORTS_DIR, GATE_PORT, GATE_SOCKET, SITE_TS_SOCKET } from './_config.mjs';
 
 /** Database names as published (lowercased bot names). */
 export const NAME = /^[a-z0-9][a-z0-9_-]{0,63}$/;
@@ -140,14 +140,29 @@ export function tokenValid(key, name, password, value, now = Date.now()) {
 
 // ---------------------------------------------------------------- who can reach the site
 
-/** 'internet' if Funnel sends the public to the gate, 'tailnet' if only tailscale serve does, else 'unknown'. */
+/** The serve config of the machine's tailscaled, or of the one at `socket`; null if it can't be read. */
+function serveStatus(socket) {
+  try {
+    return JSON.parse(execFileSync('tailscale', [...(socket ? [`--socket=${socket}`] : []), 'serve', 'status', '--json'],
+      { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'], timeout: 5000 }));
+  } catch { return null; }
+}
+
+/**
+ * Who can reach the gate, from the machine's tailscale serve and the site's own
+ * node (SITE_TS_SOCKET): 'internet' if Funnel sends the public there, 'tailnet'
+ * if only tailscale serve does, else 'unknown'. hosts: [{ host, funnel }].
+ */
 export function reach() {
-  let st;
-  try { st = JSON.parse(execFileSync('tailscale', ['serve', 'status', '--json'], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'], timeout: 5000 })); }
-  catch { return { reach: 'unknown', hosts: [] }; }
-  const target = new RegExp(`^http://(127\\.0\\.0\\.1|localhost):${GATE_PORT}/?$`);
-  const hosts = Object.entries(st?.Web ?? {})
-    .filter(([, w]) => Object.values(w?.Handlers ?? {}).some((h) => target.test(h?.Proxy ?? '')))
-    .map(([host]) => ({ host, funnel: st?.AllowFunnel?.[host] === true }));
-  return { reach: hosts.some((h) => h.funnel) ? 'internet' : hosts.length ? 'tailnet' : 'unknown', hosts };
+  const target = new RegExp(`^(http://(127\\.0\\.0\\.1|localhost):${GATE_PORT}/?|unix:${GATE_SOCKET.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')})$`);
+  const hosts = [];
+  let asked = false;
+  for (const st of [serveStatus(null), fs.existsSync(SITE_TS_SOCKET) ? serveStatus(SITE_TS_SOCKET) : null]) {
+    if (!st) continue;
+    asked = true;
+    for (const [host, w] of Object.entries(st?.Web ?? {})) {
+      if (Object.values(w?.Handlers ?? {}).some((h) => target.test(h?.Proxy ?? ''))) hosts.push({ host, funnel: st?.AllowFunnel?.[host] === true });
+    }
+  }
+  return { reach: hosts.some((h) => h.funnel) ? 'internet' : hosts.length ? 'tailnet' : 'unknown', hosts, asked };
 }

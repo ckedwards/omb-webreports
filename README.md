@@ -39,7 +39,8 @@ changes. Save any report to your iPhone home screen and it behaves like an app.
   for a dropped internet connection).
 - **Locked down by default.** Reachable only from your tailnet, read-only
   (GET/HEAD), no server-side code in the pages, hardened Apache, sandboxed
-  services. Optionally open to the internet (Tailscale Funnel), with a
+  services. Optionally its own address (`https://<name>.<tailnet>.ts.net/`) and
+  open to the internet (Tailscale Funnel), with a
   "wifi password" per database: its data and every report that reads it. It also
   isolates OpenMausBot from programs on the machine, so a bot's shell can't use
   OpenMausBot's local API to change its own skills, permissions or settings.
@@ -97,6 +98,7 @@ tailscale serve --bg --https=8443 http://127.0.0.1:8081   # HTTPS for phones (to
 sudo admin/install.sh                # asks a few questions; Apache, services, tools on PATH
 webdata-info                         # locations, URL, versions, service status
 # later: sudo webdata-admin update   # git pull + install (sudo webdata-admin: every root task)
+# optional: sudo webdata-admin site login <name>; site funnel on   (docs/setup.md, step 12)
 ```
 
 The source is cloned **as root** on purpose: root runs the installer and the

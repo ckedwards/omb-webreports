@@ -19,7 +19,7 @@ published data, jobs); the program itself is root's.
 9. [Teach your bots the skills](#9-teach-your-bots-the-skills)
 10. [Job failure notifications](#10-job-failure-notifications)
 11. [Verify everything](#11-verify-everything)
-12. [Optional: open it to the internet](#12-optional-open-it-to-the-internet)
+12. [Optional: open it to the internet](#12-optional-its-own-address-and-the-internet)
 
 ## 1. Base packages
 
@@ -198,8 +198,9 @@ tailscale serve --bg --https=8443 http://127.0.0.1:8081    # webdata-gate, which
 tailscale serve status
 ```
 
-This keeps the site on your tailnet. To open it to the internet later, see
-[step 12](#12-optional-open-it-to-the-internet).
+This keeps the site on your tailnet. For an address of its own
+(`https://<name>.<tailnet>.ts.net/`) or to open it to the internet later, see
+[step 12](#12-optional-its-own-address-and-the-internet).
 
 ## 7. Install
 
@@ -239,7 +240,7 @@ It also looks up the DuckDB-WASM build matching OpenMausBot's DuckDB
   whose Apache serves other sites;
 - starts **webdata-gate** on `127.0.0.1:GATE_PORT` as its own system user
   (`omb-webreports-gate`): the front door that applies password access
-  ([data and passwords](#12-optional-open-it-to-the-internet)) and passes
+  ([data and passwords](#12-optional-its-own-address-and-the-internet)) and passes
   everything else to Apache;
 - installs and starts two services running as you, sandboxed:
   `webdata-sync` (publishes bot databases) and `webdata-jobs` (scheduled jobs),
@@ -342,9 +343,33 @@ component. To install a report as an app: Safari → Share → Add to Home Scree
 Next: ask a bot to make its first report. Day-to-day use, logs and
 troubleshooting are in [operations.md](operations.md).
 
-## 12. Optional: open it to the internet
+## 12. Optional: its own address, and the internet
 
-[Tailscale Funnel](https://tailscale.com/kb/1223/funnel) makes the site public:
+Two separate choices.
+
+**Its own address.** The site shares the machine's name,
+`https://<machine>.<tailnet>.ts.net:8443`. To give it
+`https://<name>.<tailnet>.ts.net/` instead:
+
+```bash
+sudo webdata-admin site login reports      # prints a link: approve the new machine "reports"
+```
+
+That starts `webdata-tailscale`, a second Tailscale node on this machine just
+for the site: a new machine in your tailnet with that name. It serves
+webdata-gate on port 443, and the command sets `SITE_URL` to the new address.
+Then, in the [admin console](https://login.tailscale.com/admin/machines), turn
+off key expiry for the new machine (⋯ → Disable key expiry), or the site goes
+offline when its key expires. The old `:8443` address keeps working until you
+remove it (`sudo tailscale serve --https=8443 off`); home-screen apps saved
+from it keep using it, so add them again from the new address. Funnel on this
+node opens only the site: OpenMausBot, on the machine's own address, stays on
+the tailnet. The node runs in userspace mode as its own user and can't reach
+this machine's loopback at all ([architecture](architecture.md#security-model)).
+`sudo webdata-admin site status` shows it; `sudo webdata-admin site logout`
+takes it away again.
+
+**The internet.** [Tailscale Funnel](https://tailscale.com/kb/1223/funnel) makes the site public:
 anyone with the link can open it, no Tailscale needed. Everything goes through
 webdata-gate, so first decide what stays private. Access belongs to a
 **database** (its file, its other files, and every report whose `report.json`
@@ -362,16 +387,18 @@ Bots can do this too (their skills ask the person before a report goes public
 on the internet). Then:
 
 ```bash
-sudo tailscale funnel --bg --https=8443 http://127.0.0.1:8081
+sudo webdata-admin site funnel on          # the site's own node, or else the machine's port in SITE_URL
 ```
 
-Funnel works on ports 443, 8443 and 10000. A private report shows a password
+The first time, Tailscale may print a link to allow Funnel in your tailnet's
+policy: open it, approve, and run the command again. Without a node of its own,
+the site's port must be 443, 8443 or 10000 (Funnel's ports). A private report shows a password
 form at its own address; the right password sets a cookie for that database
 for a year (HttpOnly, Secure, SameSite=Lax). On iPhone, a home-screen app keeps
 its own cookies, so it asks once inside the app too. A new password signs every
 device out of that database. Turn Funnel off with
-`sudo tailscale funnel --https=8443 off` (tailscale serve keeps the site on
-the tailnet).
+`sudo webdata-admin site funnel off`: the site stays on the tailnet. (Not
+`tailscale funnel ... off`, which removes the address altogether.)
 
 A different default at install (`ACCESS_DEFAULT=private` in `config.env`, then
 re-run the installer): databases without a setting, and reports that read no

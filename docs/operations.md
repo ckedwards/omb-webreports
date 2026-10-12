@@ -25,6 +25,7 @@ use sudo, so they can't run it):
 sudo webdata-admin status          # install + available update, versions, services, isolation, bots' skills, failure alerts
 sudo webdata-admin update          # update omb-webreports (below)
 sudo webdata-admin pair            # a pairing code for a new browser or device (full access; --chat-only)
+sudo webdata-admin site status     # the site's address(es), its own Tailscale node, Funnel
 sudo webdata-admin skills status   # bots with the omb-webreports skills: current or outdated
 sudo webdata-admin upgrade-openmausbot --check
 ```
@@ -102,9 +103,13 @@ database not listed in its `report.json`.
 
 **The site doesn't load.** `webdata-info` (services), then
 `curl -I http://127.0.0.1:8081/` (the gate) and `curl -I http://127.0.0.1:8080/`
-(Apache). `tailscale serve status` must point the HTTPS address at the gate
-(`http://127.0.0.1:8081`); the installer repoints old setups that went to
-Apache directly.
+(Apache). The HTTPS address must point at the gate: `sudo webdata-admin site
+status` shows the site's own node (`webdata-tailscale`, serving
+`unix:/run/omb-webreports-gate/gate.sock`; `journalctl -u webdata-tailscale`)
+and the machine's `tailscale serve` (`http://127.0.0.1:8081`). The installer
+repoints old setups that went to Apache directly. A site node that stopped
+working after months: its key expired (admin console → Machines → disable key
+expiry, then `sudo webdata-admin site login`).
 
 **A report asks for a password, or 401/403 on its data.** It reads a private
 database: `webdata-access status`. 401 means "sign in"; 403 means private
@@ -219,7 +224,7 @@ different DuckDB until a matching build appears.
 ## Passwords and the internet
 
 Access belongs to a database: its file, its other files and every report whose
-`report.json` lists it ([setup step 12](setup.md#12-optional-open-it-to-the-internet),
+`report.json` lists it ([setup step 12](setup.md#12-optional-its-own-address-and-the-internet),
 [architecture](architecture.md#security-model)).
 
 ```bash
@@ -228,8 +233,9 @@ webdata-access set <db> <<'EOF'           # private with a new password (12+ cha
 the password
 EOF
 webdata-access public|private|default <db>
-sudo tailscale funnel --bg --https=8443 http://127.0.0.1:8081   # open to the internet
-sudo tailscale funnel --https=8443 off                           # back to the tailnet only
+sudo webdata-admin site funnel on         # open to the internet
+sudo webdata-admin site funnel off        # back to the tailnet only (not `tailscale funnel ... off`: that removes the address)
+sudo webdata-admin site login <name>      # the site's own address, https://<name>.<tailnet>.ts.net/
 ```
 
 - A forgotten password can't be read back (only a hash is kept): set a new one.
@@ -243,6 +249,8 @@ sudo tailscale funnel --https=8443 off                           # back to the t
 
 ```bash
 sudo webdata-admin skills logout                  # revoke its OpenMausBot session
+sudo webdata-admin site logout                    # if the site has its own Tailscale node; then remove the machine in the admin console
+sudo rm /etc/systemd/system/webdata-tailscale.service && sudo userdel omb-webreports-tailscale
 sudo systemctl disable --now webdata-sync webdata-jobs webdata-notify webdata-omb-session.timer
 sudo rm /etc/systemd/system/webdata-{sync,jobs,notify}.service /etc/systemd/system/webdata-omb-session.{service,timer}
 sudo rm -r /var/lib/omb-webreports-notify          # then delete the "omb-webreports job failures" webhooks in OpenMausBot
@@ -255,7 +263,7 @@ sudo rm /etc/apache2/sites-available/webdata.conf /etc/apache2/conf-available/zz
 sudo rm /usr/local/bin/webdata-*
 sudo rm -r /usr/local/lib/omb-webreports /usr/local/src/omb-webreports /var/cache/omb-webreports
 sudo systemctl daemon-reload
-tailscale serve --https=8443 off                  # and Funnel, if on: tailscale funnel --https=8443 off
+sudo tailscale serve --https=8443 off             # the machine's address for the site (Funnel goes with it)
 ```
 
 Apache stays installed; restore `/etc/apache2/ports.conf` (`Listen 80`) and

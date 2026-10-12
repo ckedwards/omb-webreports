@@ -71,7 +71,16 @@ live ones:
   `OMB_WEBREPORTS_CONFIG=<the test config.env> WEBDATA_GATE_KEY=/tmp/gatekey bin/webdata-gate`.
   `bin/webdata-access` with the same `OMB_WEBREPORTS_CONFIG` sets passwords
   there. Test path tricks with `curl --path-as-is`: plain curl removes `./` and
-  `%2e%2e` itself, so the gate never sees them.
+  `%2e%2e` itself, so the gate never sees them. The gate also listens on
+  `WEBDATA_GATE_SOCKET` when that file's directory exists (`curl --unix-socket`).
+- **The site's own node:** `webdata-admin site status` and `webdata-access
+  status` read a scratch `tailscaled --tun=userspace-networking --statedir=<dir>
+  --socket=<dir>/ts.sock --port=0` (as yourself, never logged in) through
+  `WEBDATA_SITE_TS_SOCKET=<dir>/ts.sock`; run `bin/_admin-site.sh` with a stub
+  `runuser` on `PATH` (it drops `-u <user> --`). The loopback block
+  (`IPAddressDeny`) only holds in the system unit: a user unit ignores it. Check
+  it on the real node from another tailnet machine (or this one, through
+  Tailscale): `curl http://<node's 100.x address>:8080/` must fail.
 - **webdata-notify:** a throwaway OpenMausBot (above) with a bot or two, scratch
   jobs, and `WEBDATA_JOBS_DIR`, `WEBDATA_JOBS_STATE`, `WEBDATA_NOTIFY_DIR`,
   `OMB_URL` and `WEBDATA_OMB_SESSION` (a file that doesn't exist) pointing at

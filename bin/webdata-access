@@ -76,9 +76,11 @@ switch (cmd) {
   case 'status': {
     const r = reach();
     const where = r.reach === 'internet' ? 'the internet (Tailscale Funnel is on)'
-      : r.reach === 'tailnet' ? 'your tailnet only (Funnel is off)' : "unknown (couldn't ask tailscale)";
+      : r.reach === 'tailnet' ? 'your tailnet only (Funnel is off)'
+      : r.asked ? 'nowhere yet (no tailscale serve points at webdata-gate)' : "unknown (couldn't ask tailscale)";
     console.log(`site       ${SITE_URL}`);
     console.log(`reachable  from ${where}`);
+    for (const h of r.hosts) console.log(`  ${h.funnel ? 'internet' : 'tailnet '}  https://${h.host.replace(/:443$/, '')}`);
     console.log(`default    databases without a setting are ${ACCESS_DEFAULT}`);
     console.log('databases');
     const dbs = databases();

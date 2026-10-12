@@ -55,6 +55,13 @@ export const LISTEN_IP = pick('LISTEN_IP', '127.0.0.1');
 export const GATE_PORT = pick('GATE_PORT', '8081');
 /** webdata-gate, where tailscale serve (and Funnel) send people. */
 export const GATE_URL = `http://127.0.0.1:${GATE_PORT}`;
+/** The gate also listens here (its systemd RuntimeDirectory), for the site's own Tailscale node. */
+export const GATE_SOCKET = process.env.WEBDATA_GATE_SOCKET || '/run/omb-webreports-gate/gate.sock';
+/** The site's own Tailscale node (webdata-tailscale.service; `sudo webdata-admin site`), if it
+ *  has one: https://<SITE_HOSTNAME>.<tailnet>.ts.net/. It can't reach this machine's loopback,
+ *  so it serves the gate through GATE_SOCKET. Empty: the site has no node of its own. */
+export const SITE_HOSTNAME = pick('SITE_HOSTNAME', '');
+export const SITE_TS_SOCKET = process.env.WEBDATA_SITE_TS_SOCKET || '/run/omb-webreports-tailscale/tailscaled.sock';
 export const SITE_URL = pick('SITE_URL', GATE_URL).replace(/\/$/, '');
 /** Apache directly, past the gate: for tools on this machine (they see private reports too). */
 export const LOCAL_URL = `http://${LISTEN_IP.includes(':') ? `[${LISTEN_IP}]` : LISTEN_IP}:${port}`;

@@ -55,6 +55,9 @@ CONFIG=$CONF_DIR/config.env
 LOOPBACK_DROPIN=/etc/systemd/system/openmausbot.service.d/omb-webreports-loopback.conf
 TOOLS=(webdata-info webdata-ls webdata-sql webdata-check webdata-new-report webdata-job webdata-browse webdata-errors webdata-sync webdata-bake webdata-skills webdata-notify webdata-admin webdata-access)
 GATE_USER=omb-webreports-gate
+# The site's own Tailscale node: its user, and the LocalAPI socket (as bin/_config.mjs SITE_TS_SOCKET).
+TS_USER=omb-webreports-tailscale
+TS_SOCKET=/run/$TS_USER/tailscaled.sock
 NODE=$(command -v node || true)
 [[ -n $NODE ]] || die "node not found (Node.js 20+ is required; see docs/setup.md)"
 asowner() { if (( TEST )); then "$@"; else runuser -u "$WEBREPORTS_OWNER" -- "$@"; fi; }
@@ -168,6 +171,8 @@ OMB_DATA_DIR=${OMB_DATA_DIR:-$HOME_DIR/.openmausbot}
 NODE_MODULES_DIR=${NODE_MODULES_DIR:-/usr/lib/node_modules}
 OMB_URL=${OMB_URL:-http://127.0.0.1:8799}
 OMB_LOOPBACK_TRUST=${OMB_LOOPBACK_TRUST:-}
+SITE_HOSTNAME=${SITE_HOSTNAME:-}
+[[ -z $SITE_HOSTNAME || $SITE_HOSTNAME =~ ^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$ ]] || die "SITE_HOSTNAME in $CONFIG must be a hostname: lowercase letters, digits and -"
 [[ $OMB_LOOPBACK_TRUST =~ ^(|owner|service)$ ]] || die "OMB_LOOPBACK_TRUST in $CONFIG must be service, owner or empty"
 OWNER=$WEBREPORTS_OWNER
 
@@ -309,6 +314,9 @@ Restart=always
 RestartSec=2
 StateDirectory=omb-webreports-gate
 StateDirectoryMode=0700
+# gate.sock: the same door as 127.0.0.1:$GATE_PORT, for the site's own Tailscale node.
+RuntimeDirectory=omb-webreports-gate
+RuntimeDirectoryMode=0755
 UMask=0077
 NoNewPrivileges=yes
 CapabilityBoundingSet=
@@ -331,6 +339,70 @@ LockPersonality=yes
 RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
 IPAddressDeny=any
 IPAddressAllow=localhost
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
+SystemCallErrorNumber=EPERM
+
+[Install]
+WantedBy=multi-user.target
+EOF
+
+# The site's own Tailscale node (SITE_HOSTNAME; `webdata-admin site login` starts
+# it): a second tailscaled in userspace mode, as its own user, so the site gets
+# https://<SITE_HOSTNAME>.<tailnet>.ts.net/ and Funnel opens only the site.
+# In userspace mode tailscaled hands a tailnet peer's connection to any port it
+# doesn't serve to 127.0.0.1 on that port, which would let peers past the gate
+# to Apache (private databases) and to OpenMausBot as a local caller. So it may
+# not reach loopback at all (IPAddressDeny), and serves the gate's Unix socket.
+# That also shuts out systemd-resolved's 127.0.0.53, so it gets the real servers.
+TAILSCALED=$(command -v tailscaled || echo /usr/sbin/tailscaled)
+resolv=""
+if grep -Eq '^nameserver[[:space:]]+(127\.|::1)' /etc/resolv.conf 2>/dev/null && [[ -f /run/systemd/resolve/resolv.conf ]]; then
+  resolv="BindReadOnlyPaths=/run/systemd/resolve/resolv.conf:/etc/resolv.conf"
+fi
+put /etc/systemd/system/webdata-tailscale.service <<EOF
+# Written by omb-webreports admin/install.sh. Started by: sudo webdata-admin site login <name>
+[Unit]
+Description=omb-webreports: the site's own Tailscale node (SITE_HOSTNAME in $CONFIG)
+Wants=network-online.target
+After=network-online.target systemd-resolved.service webdata-gate.service
+
+[Service]
+Type=notify
+User=$TS_USER
+Group=$TS_USER
+ExecStart=$TAILSCALED --tun=userspace-networking --statedir=/var/lib/$TS_USER --socket=$TS_SOCKET --port=0
+Restart=on-failure
+RestartSec=5
+StateDirectory=$TS_USER
+StateDirectoryMode=0700
+RuntimeDirectory=$TS_USER
+RuntimeDirectoryMode=0755
+UMask=0077
+# In userspace mode tailscaled passes a tailnet peer's connection to a port it
+# doesn't serve on to 127.0.0.1 on that port: past the gate. So no loopback at
+# all; it reaches the gate by the gate's socket.
+IPAddressDeny=localhost
+$resolv
+NoNewPrivileges=yes
+CapabilityBoundingSet=
+AmbientCapabilities=
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectSystem=strict
+ProtectHome=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+ProtectHostname=yes
+ProtectProc=invisible
+RestrictNamespaces=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX AF_NETLINK
 SystemCallArchitectures=native
 SystemCallFilter=@system-service
 SystemCallErrorNumber=EPERM
@@ -493,9 +565,11 @@ fi
 
 # --- packages --------------------------------------------------------------------
 (( TEST )) || apt-get install -y -qq apache2 acl >/dev/null
-if (( ! TEST )) && ! id "$GATE_USER" >/dev/null 2>&1; then
-  useradd --system --no-create-home --home-dir /nonexistent --shell /usr/sbin/nologin "$GATE_USER"
-fi
+for u in "$GATE_USER" "$TS_USER"; do
+  if (( ! TEST )) && ! id "$u" >/dev/null 2>&1; then
+    useradd --system --no-create-home --home-dir /nonexistent --shell /usr/sbin/nologin "$u"
+  fi
+done
 
 # --- the program: a root-owned copy of just what runs and what agents read --------
 PROGRAM_DIRS=(bin skills templates examples docs webroot/lib webroot/reports/_gallery)
@@ -633,6 +707,12 @@ apache2ctl configtest
 systemctl daemon-reload
 systemctl enable -q apache2 webdata-gate.service webdata-sync.service webdata-jobs.service webdata-notify.service
 systemctl restart apache2 webdata-gate.service webdata-sync.service webdata-jobs.service
+# The site's own Tailscale node, once it has been set up (webdata-admin site login);
+# restarted so it runs the tailscaled that's installed now.
+if [[ -n $SITE_HOSTNAME ]]; then
+  systemctl enable -q webdata-tailscale.service
+  systemctl restart webdata-tailscale.service
+fi
 
 # --- tailscale serve: people go to the gate, never straight to Apache -----------------
 # Older installs pointed tailscale serve (and maybe Funnel) at Apache's tailnet
@@ -710,9 +790,14 @@ echo "  check    webdata-info; as root: sudo webdata-admin status"
 if [[ -n $MIGRATE ]]; then
   echo "  migrated from $MIGRATE: once the site looks right, delete that folder (its services now run from $PREFIX)"
 fi
-if [[ $SITE_URL == https://*.ts.net:* ]] && ! tailscale serve status 2>/dev/null | grep -q "127.0.0.1:$GATE_PORT"; then
-  echo "  HTTPS    not set up yet: tailscale serve --bg --https=${SITE_URL##*:} http://127.0.0.1:$GATE_PORT"
+if [[ -n $SITE_HOSTNAME ]]; then
+  echo "  node     the site's own Tailscale node, $SITE_HOSTNAME: sudo webdata-admin site status"
+else
+  if [[ $SITE_URL == https://*.ts.net:* ]] && ! tailscale serve status 2>/dev/null | grep -q "127.0.0.1:$GATE_PORT"; then
+    echo "  HTTPS    not set up yet: tailscale serve --bg --https=${SITE_URL##*:} http://127.0.0.1:$GATE_PORT"
+  fi
+  echo "  address  for https://<name>.<tailnet>.ts.net/ (its own Tailscale node): sudo webdata-admin site login <name>"
 fi
 echo "  internet to open the site to everyone (set passwords first: webdata-access status):"
-echo "           sudo tailscale funnel --bg --https=${SITE_URL##*:} http://127.0.0.1:$GATE_PORT"
+echo "           sudo webdata-admin site funnel on"
 

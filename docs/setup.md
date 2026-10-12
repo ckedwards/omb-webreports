@@ -296,16 +296,16 @@ session).
 Bots will ask for approval to read and write the checkout and to run the
 `webdata-*` commands; allow them in the bot's settings if that gets tedious.
 
-## 10. Optional: job failure notifications
+## 10. Job failure notifications
 
-To have a bot fix a scheduled data job when it fails, create an OpenMausBot
-webhook for that bot and register its URL. See
+Nothing to do: `webdata-notify` sets up a webhook for each bot that a job's
+`"notify_failure"` names, and new jobs name their own bot. See
 [data-jobs.md](data-jobs.md#failure-notifications).
 
 ## 11. Verify everything
 
 ```bash
-webdata-info                    # versions, paths, all four services "active", browser DuckDB "same as the server",
+webdata-info                    # versions, paths, all five services "active", browser DuckDB "same as the server",
                                 # OpenMausBot isolation "on" with a webdata-skills session
 webdata-check _gallery          # renders the design gallery on a headless iPhone: must print OK
 ```

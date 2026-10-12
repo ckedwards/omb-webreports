@@ -78,7 +78,7 @@ versions
   node               ${process.versions.node}
 
 services
-${['openmausbot', 'apache2', 'webdata-sync', 'webdata-jobs'].map((u) => `  ${u.padEnd(18)} ${active(u)}`).join('\n')}
+${['openmausbot', 'apache2', 'webdata-sync', 'webdata-jobs', 'webdata-notify'].map((u) => `  ${u.padEnd(18)} ${active(u)}`).join('\n')}
 
 OpenMausBot isolation
   ${await isolationLine()}`);

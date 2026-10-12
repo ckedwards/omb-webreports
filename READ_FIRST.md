@@ -44,6 +44,7 @@ DOCS/                      read-only
 │   ├── webdata-check      render a report at iPhone size, light + dark: problems + screenshots
 │   ├── webdata-errors     JavaScript errors reported by real browsers/phones (lib/report-errors.js)
 │   ├── webdata-job        scheduled data jobs: new / run / list / logs / enable / notify-test
+│   ├── webdata-notify     failure alerts (a root service): status
 │   ├── webdata-browse     headless Chrome for job scripts: render a page, return HTML/text/JS result
 │   ├── webdata-sync       snapshots, catalog, report index (runs as a service)
 │   └── webdata-bake       bakes each report's first render (run by webdata-sync)
@@ -337,13 +338,17 @@ a private `/tmp` are writable (home is read-only), so scripts use the Python sta
 library or Node built-ins. Pages that need JavaScript: `bin/webdata-browse`
 (headless Chrome, fresh profile per call, works in the sandbox).
 
-Failure notifications: `JOBS/.notify.env` (chmod 600) maps a bot to an
-OpenMausBot webhook URL (`MyBot=http://127.0.0.1:8800/hooks/wh_.../whsec_...`).
-A failed *scheduled* run POSTs `{event: "webdata.job.failed", job, error, log_tail, ...}`
-there (first failure, then at most daily), which starts a bot task to fix it.
-`webdata-job notify-test <bot>` checks the wiring. Tests of the runner must set
+Failure alerts: `"notify_failure": "<bot>"` in job.json (set by `webdata-job new`).
+A script exits 75 when its source can't be reached (temporary) and any other
+non-zero code when it's broken. `webdata-notify` (root; it holds the webhooks,
+bots never see them) starts a task in that bot when a scheduled job keeps
+failing: broken twice in a row, temporary past `notify_after` (12h), and again
+past `assume_gone_after` (3d); held while the internet is down. The rules are
+in `bin/_notify.mjs`; `webdata-job list` shows each job's alert state,
+`webdata-job notify-test <name>` asks for a test. Tests of the runner must set
 `WEBDATA_JOBS_DIR`/`WEBDATA_JOBS_STATE` (and `OMB_DATA_DIR`) to scratch folders:
-the live service watches `JOBS`.
+the live service watches `JOBS`; tests of webdata-notify also `WEBDATA_NOTIFY_DIR`,
+`OMB_URL` (a throwaway OpenMausBot) and `WEBDATA_OMB_SESSION`.
 The `webdata-data-job` skill is the full procedure. An OpenMausBot *routine* is the
 alternative when collection needs judgment (it re-runs the bot, with AI).
 

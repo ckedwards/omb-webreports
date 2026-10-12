@@ -97,32 +97,46 @@ loosen checks without asking you.
 
 ## Failure notifications
 
-The runner can start that conversation itself. When a **scheduled** run fails,
-it POSTs the job name, error and the end of the log to an OpenMausBot webhook
-(on the first failure, then at most once a day while it keeps failing). The bot
-gets a task with the details and fixes the job, asking for your approvals as
-usual.
+The bot can be told on its own. With `"notify_failure": "<bot>"` in a job's
+`job.json` (`webdata-job new` sets it to the job's bot; any bot may be named,
+say one that looks after all jobs), a failing **scheduled** run starts a task
+in that bot. The bot gets the job, how long it has been failing, network and
+source checks and the end of the log, and follows its skill: wait out an
+outage, fix a broken script, or, if the source seems gone, **propose** an
+alternate source to you. It doesn't change the schedule or switch sources
+without your OK.
 
-1. In OpenMausBot, create a **webhook** for the bot that runs a task, with a
-   prompt such as:
+Alerts wait until a failure is worth a task. A script exits **75** when its
+source can't be reached (DNS or connection errors, timeouts, HTTP 429/5xx;
+the skill and the script template do this) and any other code when the source
+answered but not as expected:
 
-   > A scheduled data job failed; the event data has the job, error and log
-   > tail. Follow "Fixing a failed job" in the webdata-data-job skill: find the
-   > cause, fix the script with the smallest change, dry-run, then one real run.
-   > Don't change the schedule, tables or checks, or disable the job, without
-   > asking me. Report what failed and what you changed.
+| Failure | Alert |
+|---|---|
+| broken (any exit code but 75) | after 2 failed runs in a row |
+| temporary (exit 75, timeout, the bot's database busy too long) | once it has lasted `notify_after` (default `12h`) |
+| temporary for `assume_gone_after` (default `3d`) | again, as "the source may be gone" |
+| still failing | a reminder at most once a day; a worse stage at once |
+| this machine's internet was down, or most other jobs are failing temporarily too | none (held) |
+| the last run was manual | none (someone is working on it) |
 
-2. Register its URL (it contains the secret) for that bot:
+`notify_after` and `assume_gone_after` take `30m`, `6h`, `2d`, `1w`. After a
+failed scheduled run, the runner checks two well-known hosts and the job's
+source hosts (`"sources": [...]` in job.json, else the URLs in its script) and
+logs the result (`checks:` in the run log).
 
-   ```bash
-   echo 'MyBot=http://127.0.0.1:8800/hooks/wh_…/whsec_…' >> /var/lib/omb-webreports/jobs/.notify.env
-   chmod 600 /var/lib/omb-webreports/jobs/.notify.env
-   ```
+Nothing to set up: **`webdata-notify`**, a service the installer adds, creates
+one OpenMausBot webhook per bot that jobs name ("omb-webreports job
+failures"), sends it a test alert, and deletes it 10 minutes after no job
+names that bot. It runs as root, so the webhooks' secrets stay where bots
+(which run as you) can't read them, in `/var/lib/omb-webreports-notify/private/`.
 
-   One line per bot; `*=<url>` is a fallback for all bots. OpenMausBot's webhook
-   receiver listens on `127.0.0.1:<its port + 1>` (8800 by default).
+```bash
+webdata-job list                  # each job's "alerts:" line
+webdata-notify status             # webhooks per bot, each job's alert state
+webdata-job notify-test <name>    # the job's bot should get a test task within a minute
+journalctl -u webdata-notify -f
+```
 
-3. Test it: `webdata-job notify-test MyBot`. The bot should get a test event.
-   If OpenMausBot asks you to verify the webhook's first delivery, this is it.
-
-Manual runs (`webdata-job run`) never notify: you see the error directly.
+If a webhook is turned off in OpenMausBot, alerts for it pause until you turn
+it back on. Deleting it there makes the service create a new one.

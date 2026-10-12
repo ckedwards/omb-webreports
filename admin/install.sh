@@ -22,8 +22,9 @@
 #                                      which source and commit is installed
 #   DATA_DIR (/var/lib/omb-webreports) your reports, published data, jobs and state,
 #                                      owned by WEBREPORTS_OWNER (who runs OpenMausBot)
-#   Apache (dedicated to this site), webdata-sync, webdata-jobs, the OpenMausBot
-#   isolation drop-in and session timer, and the webdata-* tools in /usr/local/bin.
+#   Apache (dedicated to this site), webdata-sync, webdata-jobs, webdata-notify
+#   (failure alerts, root), the OpenMausBot isolation drop-in and session timer,
+#   and the webdata-* tools in /usr/local/bin.
 set -euo pipefail
 
 SRC=$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/.." && pwd)
@@ -50,7 +51,7 @@ PREFIX=/usr/local/lib/omb-webreports
 CONF_DIR=/etc/omb-webreports
 CONFIG=$CONF_DIR/config.env
 LOOPBACK_DROPIN=/etc/systemd/system/openmausbot.service.d/omb-webreports-loopback.conf
-TOOLS=(webdata-info webdata-ls webdata-sql webdata-check webdata-new-report webdata-job webdata-browse webdata-errors webdata-sync webdata-bake webdata-skills)
+TOOLS=(webdata-info webdata-ls webdata-sql webdata-check webdata-new-report webdata-job webdata-browse webdata-errors webdata-sync webdata-bake webdata-skills webdata-notify)
 NODE=$(command -v node || true)
 [[ -n $NODE ]] || die "node not found (Node.js 20+ is required; see docs/setup.md)"
 asowner() { if (( TEST )); then "$@"; else runuser -u "$WEBREPORTS_OWNER" -- "$@"; fi; }
@@ -337,6 +338,54 @@ ReadWritePaths=$DATA_DIR $OMB_DATA_DIR/bots
 WantedBy=multi-user.target
 EOF
 
+# Failure alerts. Root, because it holds the webhooks' secrets (in its own
+# StateDirectory, which bots can't read) and uses the OpenMausBot admin session.
+# It reads the jobs' files only through a child it runs as the owner, and treats
+# them as data. Everything else is locked down: read-only system, no home dirs,
+# localhost only (OpenMausBot), and just the capabilities to switch to the owner.
+put /etc/systemd/system/webdata-notify.service <<EOF
+# Written by omb-webreports admin/install.sh.
+[Unit]
+Description=omb-webreports notify: alerts a bot when a scheduled data job keeps failing
+After=network.target openmausbot.service
+
+[Service]
+Type=simple
+ExecStart=$NODE $PREFIX/bin/webdata-notify daemon
+Restart=always
+RestartSec=10
+Nice=10
+StateDirectory=omb-webreports-notify
+StateDirectoryMode=0755
+UMask=0022
+NoNewPrivileges=yes
+CapabilityBoundingSet=CAP_SETUID CAP_SETGID
+AmbientCapabilities=
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectSystem=strict
+ProtectHome=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+ProtectHostname=yes
+RestrictNamespaces=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+IPAddressDeny=any
+IPAddressAllow=localhost
+SystemCallArchitectures=native
+SystemCallFilter=@system-service @setuid
+SystemCallErrorNumber=EPERM
+
+[Install]
+WantedBy=multi-user.target
+EOF
+
 # OpenMausBot isolation (OMB_LOOPBACK_TRUST). With "service", OpenMausBot ignores
 # requests from this machine that have no login, so bots' shells can't
 # administer it. webdata-skills signs in with its own session (root-only, in
@@ -430,7 +479,7 @@ if [[ -n $MIGRATE ]]; then
     [[ -d $d ]] || continue; name=$(basename "$d"); [[ -e $D$DATA_DIR/jobs/$name ]] && continue
     asowner cp -a "$d" "$D$DATA_DIR/jobs/$name" && echo "  job $name"
   done
-  for f in jobs/.notify.env sync.json; do
+  for f in sync.json; do
     [[ -f $MIGRATE/$f && ! -e $D$DATA_DIR/$f ]] && asowner cp -a "$MIGRATE/$f" "$D$DATA_DIR/$f" && echo "  $f"
   done
   [[ -d $MIGRATE/.state/jobs && ! -e $D$DATA_DIR/.state/jobs ]] && asowner cp -a "$MIGRATE/.state/jobs" "$D$DATA_DIR/.state/jobs" && echo "  job history"
@@ -511,7 +560,7 @@ apache2ctl configtest
 
 # --- services ----------------------------------------------------------------------------
 systemctl daemon-reload
-systemctl enable -q apache2 webdata-sync.service webdata-jobs.service
+systemctl enable -q apache2 webdata-sync.service webdata-jobs.service webdata-notify.service
 systemctl restart apache2 webdata-sync.service webdata-jobs.service
 
 # --- OpenMausBot isolation ---------------------------------------------------------------
@@ -543,6 +592,12 @@ if systemctl cat openmausbot.service >/dev/null 2>&1; then
     rm -f /etc/systemd/system/webdata-omb-session.service /etc/systemd/system/webdata-omb-session.timer
     systemctl daemon-reload
   fi
+fi
+
+# Failure alerts use the session above, so they start after it.
+systemctl restart webdata-notify.service
+if [[ -f $DATA_DIR/jobs/.notify.env ]]; then
+  warn "$DATA_DIR/jobs/.notify.env is no longer used (bots could read it): failure alerts now come from webdata-notify. Add \"notify_failure\": \"<bot>\" to each job.json, delete the file, and remove those webhooks in OpenMausBot."
 fi
 
 # --- bots' skills ------------------------------------------------------------------------

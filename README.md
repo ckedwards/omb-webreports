@@ -33,8 +33,9 @@ changes. Save any report to your iPhone home screen and it behaves like an app.
 - **Scheduled data refreshes without AI.** After a bot collects data once, it can
   turn the collection into a plain script on a cron schedule (APIs, CSV/JSON,
   HTML, or JavaScript-rendered pages via headless Chrome). Runs are validated
-  and applied atomically; a failure writes nothing and can ping the bot through
-  an OpenMausBot webhook to fix it.
+  and applied atomically; a failure writes nothing. A job that keeps failing
+  starts a task in a bot to fix it, after waiting out short outages (and never
+  for a dropped internet connection).
 - **Locked down by default.** Reachable only from your tailnet, read-only
   (GET/HEAD), no server-side code, hardened Apache, sandboxed services. It also
   isolates OpenMausBot from programs on the machine, so a bot's shell can't use

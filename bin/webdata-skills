@@ -101,7 +101,7 @@ async function status() {
   const want = new Map(skills.map((s) => [s.name, s]));
   const committed = readPackageFile();
   const built = buildPackage(skills, committed);
-  log(`package   ${path.relative(process.cwd(), PACKAGE_FILE) || PACKAGE_FILE}: ${!committed ? 'MISSING (webdata-skills package)' : samePackageContent(committed, built) ? `current (release ${committed.package.release})` : 'OUT OF DATE (webdata-skills package)'}`);
+  log(`package   ${PACKAGE_FILE}: ${!committed ? 'MISSING (webdata-skills package)' : samePackageContent(committed, built) ? `current (release ${committed.package.release})` : 'OUT OF DATE (webdata-skills package)'}`);
   await ombReady(5_000);
   let anyOutdated = false;
   for (const bot of await bots()) {

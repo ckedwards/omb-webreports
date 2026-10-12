@@ -23,6 +23,7 @@ sudo webdata-skills status         # bots with the omb-webreports skills: curren
 |---|---|
 | `webdata-sync` | `journalctl -u webdata-sync -f` (bakes log as `bake: …`) |
 | `webdata-jobs` | `journalctl -u webdata-jobs -f`; per run: `webdata-job logs <name>` |
+| `webdata-notify` | `journalctl -u webdata-notify -f`; state: `webdata-notify status` |
 | `apache2` | `/var/log/apache2/webdata-access.log`, `webdata-error.log` |
 | `openmausbot` | `journalctl -u openmausbot -f` |
 
@@ -184,8 +185,9 @@ different DuckDB until a matching build appears.
 
 ```bash
 sudo webdata-skills logout                        # revoke its OpenMausBot session
-sudo systemctl disable --now webdata-sync webdata-jobs webdata-omb-session.timer
-sudo rm /etc/systemd/system/webdata-{sync,jobs}.service /etc/systemd/system/webdata-omb-session.{service,timer}
+sudo systemctl disable --now webdata-sync webdata-jobs webdata-notify webdata-omb-session.timer
+sudo rm /etc/systemd/system/webdata-{sync,jobs,notify}.service /etc/systemd/system/webdata-omb-session.{service,timer}
+sudo rm -r /var/lib/omb-webreports-notify          # then delete the "omb-webreports job failures" webhooks in OpenMausBot
 sudo rm -r /etc/omb-webreports /etc/systemd/system/openmausbot.service.d/omb-webreports-loopback.conf
 sudo systemctl restart openmausbot                # back to OpenMausBot's default local trust
 sudo rm /etc/systemd/system/apache2.service.d/tailscale.conf

@@ -38,7 +38,7 @@ export function repoSkills() {
 }
 
 /** Where a skill came from, recorded in the bot's skill list. */
-export const skillSource = (name) => `${REPO_URL}/blob/main/skills/${name}/SKILL.md`;
+export const skillSource = (name) => `${REPO_URL}/blob/HEAD/skills/${name}/SKILL.md`;
 
 // ---------------------------------------------------------------- the package
 

@@ -274,8 +274,22 @@ notifications) is unaffected.
 
 **Jobs.** A job script runs unattended as you, inside that sandbox. The
 data-job skill requires the bot to show you the script and get your explicit
-OK before enabling it. Job secrets live in `jobs/<name>/.env` (git-ignored);
-webhook URLs in `jobs/.notify.env` (git-ignored, `chmod 600`).
+OK before enabling it. Job secrets live in `jobs/<name>/.env` (git-ignored).
+
+**Failure alerts.** `webdata-notify` runs as root because it holds the
+webhooks' secrets (in `/var/lib/omb-webreports-notify/private`, `0700`) and
+uses webdata-skills' OpenMausBot session; a bot that could read a webhook
+secret could start tasks in any bot at will. The jobs' files are the bots' to
+write, so the service never opens them as root: it runs `bin/_notify-read.mjs`
+as the owner (a planted symlink reaches only what the owner could read
+anyway), caps sizes, and uses what comes back only as data: which bot to
+alert, and the details in the alert. The unit is otherwise locked down:
+read-only system, no home directories, localhost only, a syscall filter, and
+no capabilities beyond switching to the owner. What a bot can still do,
+accepted: name any bot in `notify_failure`, or fake a failure in its
+`status.json`. Either way the result is a task running the service's fixed
+instructions, with the event marked as untrusted data, at most once a day per
+job and 3 unfinished tasks per webhook; it gains no permissions or secrets.
 
 **Browser side.** Reports insert data with `textContent`, never `innerHTML`.
 The only third-party code loaded at runtime is DuckDB-WASM from jsDelivr, at a

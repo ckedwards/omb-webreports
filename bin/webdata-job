@@ -20,23 +20,25 @@
 //   webdata-job logs <name> [--all]        last run's log (or list of runs)
 //   webdata-job enable|disable <name>
 //   webdata-job show <name>                job.json, validation, next 5 runs
-//   webdata-job notify-test <bot>          send a test event to the bot's webhook
+//   webdata-job notify-test <name>         ask webdata-notify to send a test alert for the job
 //   webdata-job daemon                     the scheduler (webdata-jobs.service)
 //
 // Scheduled runs start a fixed 0-50 s into their minute (from the job's name),
 // so jobs due in the same minute don't all start at once.
 //
-// Failure notifications: jobs/.notify.env (chmod 600) maps a bot to an
-// OpenMausBot webhook URL, one per line: MyBot=http://127.0.0.1:8800/hooks/wh_.../whsec_...
-// When a scheduled run fails, the runner POSTs the job, error and log tail
-// there, so the bot can start a task to fix it: on the first failure, then at
-// most once a day while it keeps failing.
+// Failure alerts: "notify_failure": "<bot>" in job.json. The runner records
+// each failure's kind (the script exits 75 when its source can't be reached:
+// temporary; anything else: broken) and, after a failed scheduled run, checks
+// this machine's internet connection and the job's sources. webdata-notify
+// (a root service: it holds the webhooks, bots can't see them) reads that and
+// starts a task in the bot when it's worth one (bin/_notify.mjs).
 //
 // Table modes: replace (default; whole table each run), append (add rows),
 // upsert (replace rows with the same key, add new ones; needs a key).
 
 import { spawn } from 'node:child_process';
 import crypto from 'node:crypto';
+import dns from 'node:dns/promises';
 import fs from 'node:fs';
 import { createRequire } from 'node:module';
 import os from 'node:os';
@@ -44,6 +46,7 @@ import path from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 
 import { DATA_DIR, JOBS_DIR, STATE_DIR, PUBLISHED_DIR, OMB_DATA_DIR, NODE_MODULES_DIR } from './_config.mjs';
+import { TEMPFAIL, NOTIFY_STATUS, HEARTBEAT_MS, alertSettings, fmtDuration } from './_notify.mjs';
 // Overridable so tests never share a folder with the live webdata-jobs service.
 const JOBS = process.env.WEBDATA_JOBS_DIR || JOBS_DIR;
 const STATE = process.env.WEBDATA_JOBS_STATE || path.join(STATE_DIR, 'jobs');
@@ -58,8 +61,6 @@ const TABLE = /^[a-z_][a-z0-9_]{0,62}$/;
 const MODES = new Set(['replace', 'append', 'upsert']);
 const FORMATS = ['parquet', 'ndjson', 'jsonl', 'json', 'csv'];
 const KEEP_LOGS = 30;
-const NOTIFY_FILE = path.join(JOBS, '.notify.env');
-const RENOTIFY_MS = 24 * 3600_000;
 const LOCK_RETRY_MS = 15_000;
 
 const readJSON = (f, fallback) => { try { return JSON.parse(fs.readFileSync(f, 'utf8')); } catch { return fallback; } };
@@ -191,6 +192,7 @@ function loadJob(name) {
     lockWaitMinutes: Number(raw.lock_wait_minutes ?? 20),
     command: raw.command ? String(raw.command) : null,
     tables: {},
+    alerts: alertSettings(raw),
   };
   try { job.cron = parseCron(job.schedule); } catch (e) { problems.push(`schedule: ${e.message}`); }
   try { new Intl.DateTimeFormat('en-US', { timeZone: job.timezone }); } catch { problems.push(`timezone "${job.timezone}" is not an IANA zone (e.g. America/Toronto)`); }
@@ -282,10 +284,14 @@ async function runJob(job, { dryRun = false, trigger = 'manual', echo = false } 
       };
       pipe(child.stdout, '  ');
       pipe(child.stderr, '! ');
-      const timer = setTimeout(() => { log(`timeout after ${job.timeoutMinutes} minutes; killing`); try { process.kill(-child.pid, 'SIGKILL'); } catch {} }, job.timeoutMinutes * 60_000);
+      let timedOut = false;
+      const timer = setTimeout(() => { timedOut = true; log(`timeout after ${job.timeoutMinutes} minutes; killing`); try { process.kill(-child.pid, 'SIGKILL'); } catch {} }, job.timeoutMinutes * 60_000);
       child.on('error', (e) => { log(`could not start: ${e.message}`); clearTimeout(timer); resolve(-1); });
-      child.on('close', (c, sig) => { clearTimeout(timer); resolve(sig ? -1 : c); });
+      child.on('close', (c, sig) => { clearTimeout(timer); resolve(timedOut ? 'timeout' : sig ? -1 : c); });
     });
+    // A hung script is nearly always a source that stopped answering.
+    if (code === 'timeout') throw temporary(`script timed out after ${job.timeoutMinutes} minutes (temporary); nothing written`);
+    if (code === TEMPFAIL) throw temporary(`script exited with ${code} (temporary: its source couldn't be reached); nothing written`);
     if (code !== 0) throw new Error(`script exited with ${code}; nothing written`);
 
     // 2. stage + validate (no lock on the bot's database yet)
@@ -354,7 +360,8 @@ async function runJob(job, { dryRun = false, trigger = 'manual', echo = false } 
     let db;
     for (let attempt = 1; ; attempt++) {
       try { db = await DuckDBInstance.create(job.bot.db); break; } catch (e) {
-        if (!/lock/i.test(e.message) || Date.now() > deadline) throw new Error(`could not open ${job.bot.name}'s database: ${e.message.split('\n')[0]}; nothing written`);
+        if (!/lock/i.test(e.message)) throw new Error(`could not open ${job.bot.name}'s database: ${e.message.split('\n')[0]}; nothing written`);
+        if (Date.now() > deadline) throw temporary(`${job.bot.name}'s database stayed in use by OpenMausBot for ${job.lockWaitMinutes}m (temporary); nothing written`);
         if (attempt === 1) log(`${job.bot.name}'s database is in use by OpenMausBot; waiting (up to ${job.lockWaitMinutes}m)`);
         await sleep(LOCK_RETRY_MS);
       }
@@ -392,7 +399,7 @@ async function runJob(job, { dryRun = false, trigger = 'manual', echo = false } 
     return result;
   } catch (e) {
     log(`FAILED: ${e.message}`);
-    result = { ok: false, error: e.message.split('\n')[0] };
+    result = { ok: false, error: e.message.split('\n')[0], kind: e.temporary ? 'temporary' : 'broken' };
     return result;
   } finally {
     const seconds = Math.round((Date.now() - t0) / 100) / 10;
@@ -400,20 +407,24 @@ async function runJob(job, { dryRun = false, trigger = 'manual', echo = false } 
     if (!result.dry) {
       Object.assign(status, { running: false, last_finished: stamp(), last_ok: result.ok, last_error: result.error ?? null,
         last_duration_s: seconds, last_log: rel(logFile) });
+      delete status.notified_at;   // from before webdata-notify
       if (result.ok) {
         status.last_success = status.last_finished;
         status.last_rows = Object.fromEntries(Object.entries(result.tables).map(([t, s]) => [t, s.rows_after ?? s.rows]));
-        status.consecutive_failures = 0;
-        status.notified_at = null;
+        Object.assign(status, { consecutive_failures: 0, broken_failures: 0, failing_since: null, failure_kind: null, checks: null });
       } else {
         status.consecutive_failures = (status.consecutive_failures || 0) + 1;
+        status.broken_failures = result.kind === 'broken' ? (status.broken_failures || 0) + 1 : 0;
+        status.failing_since ||= status.last_started;
+        status.failure_kind = result.kind;
+        status.checks = null;
+        if (trigger === 'schedule') {
+          // What webdata-notify (and the bot it alerts) needs to tell an outage from a real change.
+          status.checks = await networkChecks(job);
+          log(`checks: internet ${status.checks.internet}${status.checks.sources.map((c) => ` · ${c.host} ${c.result}`).join('')}`);
+        }
       }
       writeJSON(path.join(sdir, 'status.json'), status);
-      if (trigger === 'schedule' && !result.ok) {
-        await new Promise((r) => logStream.write('', r));
-        await maybeNotify(job, status, logFile, log);
-        writeJSON(path.join(sdir, 'status.json'), status);
-      }
     }
     await new Promise((r) => logStream.end(r));
     const logs = fs.readdirSync(path.join(sdir, 'runs')).sort();
@@ -422,55 +433,69 @@ async function runJob(job, { dryRun = false, trigger = 'manual', echo = false } 
   }
 }
 
-// ---------------------------------------------------------------- notify
+// ---------------------------------------------------------------- failures
 
-function webhookFor(botName) {
-  if (!fs.existsSync(NOTIFY_FILE)) return null;
-  const mode = fs.statSync(NOTIFY_FILE).mode & 0o077;
-  if (mode) console.error(`warning: ${rel(NOTIFY_FILE)} is readable by others; chmod 600 it`);
-  const map = dotenv(NOTIFY_FILE);
-  const key = Object.keys(map).find((k) => k.toLowerCase() === String(botName).toLowerCase()) ?? (map['*'] ? '*' : null);
-  return key ? map[key] : null;
+const temporary = (message) => Object.assign(new Error(message), { temporary: true });
+
+// Two well-known hosts, one by address (no DNS needed): if neither answers,
+// it's this machine's connection, not the job's source.
+const INTERNET_PROBES = ['https://1.1.1.1/', 'https://www.google.com/generate_204'];
+
+function netError(e) {
+  const code = e?.cause?.code || e?.code || e?.name;
+  if (code === 'ENOTFOUND') return 'dns: no such name';
+  if (code === 'EAI_AGAIN') return 'dns: no answer';
+  if (code === 'ECONNREFUSED') return 'connection refused';
+  if (code === 'ECONNRESET') return 'connection reset';
+  if (code === 'TimeoutError' || code === 'ETIMEDOUT' || code === 'UND_ERR_CONNECT_TIMEOUT') return 'timed out';
+  if (/CERT|SSL|TLS/.test(String(code))) return `TLS error (${code})`;
+  return String(code || e?.message || e).slice(0, 80);
 }
 
-async function postWebhook(url, payload) {
-  const res = await fetch(url, {
-    method: 'POST', headers: { 'content-type': 'application/json' },
-    body: JSON.stringify(payload), signal: AbortSignal.timeout(10_000),
-  });
-  const text = (await res.text()).slice(0, 300);
-  if (!res.ok) throw new Error(`HTTP ${res.status} ${text}`);
-  return text;
-}
-
-/** After a scheduled run: tell the bot about a failure (first one, then daily). */
-async function maybeNotify(job, status, logFile, log) {
-  if (status.last_ok) return;
-  const due = !status.notified_at || Date.now() - Date.parse(status.notified_at) > RENOTIFY_MS;
-  if (!due) { log(`notify: already sent ${ago(status.notified_at)}; next reminder after 24h`); return; }
-  const url = webhookFor(job.bot.name);
-  if (!url) { log(`notify: no webhook for ${job.bot.name} in ${rel(NOTIFY_FILE)}; not notified`); return; }
-  const tail = fs.readFileSync(logFile, 'utf8').split('\n').slice(-80).join('\n').slice(-16_000);
-  const payload = {
-    event: 'webdata.job.failed',
-    job: job.name, bot: job.bot.name, description: job.description,
-    error: status.last_error, consecutive_failures: status.consecutive_failures,
-    last_success: status.last_success ?? null, failed_at: status.last_finished,
-    schedule: `${job.schedule} (${job.timezone})`, tables: Object.keys(job.tables),
-    job_dir: job.dir, log_file: logFile, log_tail: tail,
-    how_to_investigate: [
-      `webdata-job logs ${job.name}`,
-      `webdata-job run ${job.name} --dry-run`,
-      'Follow "Fixing a failed job" in the webdata-data-job skill.',
-    ],
-  };
+async function probe(url) {
   try {
-    await postWebhook(url, payload);
-    status.notified_at = stamp();
-    log(`notify: sent failure to ${job.bot.name}'s webhook`);
-  } catch (e) {
-    log(`notify: webhook failed: ${e.message}`);
+    const r = await fetch(url, { method: 'HEAD', redirect: 'manual', signal: AbortSignal.timeout(8000),
+      headers: { 'user-agent': 'webdata-job (+openmausbot)' } });
+    return `answers (HTTP ${r.status})`;
+  } catch (e) { return netError(e); }
+}
+
+/** The hosts a job reads from: its "sources", else the URLs written in its script. */
+function sourceHosts(job) {
+  const hosts = new Set();
+  const add = (u) => {
+    const h = /^(?:https?:\/\/)?([a-z0-9-]+(?:\.[a-z0-9-]+)+)/i.exec(String(u).trim())?.[1]?.toLowerCase();
+    if (h && !/^(localhost|127\.|0\.|10\.|192\.168\.)/.test(h)) hosts.add(h);
+  };
+  job.alerts.sources.forEach(add);
+  if (!hosts.size) {
+    let text = job.command ?? '';
+    try { if (job.script) text = fs.readFileSync(path.join(job.dir, job.script), 'utf8').slice(0, 200_000); } catch {}
+    for (const m of text.matchAll(/https?:\/\/[a-z0-9.-]+/gi)) add(m[0]);
   }
+  return [...hosts].slice(0, 5);
+}
+
+/** After a failed scheduled run: can this machine reach the internet, and the job's sources? */
+async function networkChecks(job) {
+  const internet = (await Promise.all(INTERNET_PROBES.map(probe))).some((r) => r.startsWith('answers')) ? 'ok' : 'down';
+  const sources = await Promise.all(sourceHosts(job).map(async (host) => {
+    try { await dns.lookup(host); } catch (e) { return { host, result: netError(e) }; }
+    return { host, result: await probe(`https://${host}/`) };
+  }));
+  return { at: stamp(), internet, sources };
+}
+
+/** webdata-notify's view of a job's alerts, for list. */
+function alertLine(job, notifyStatus) {
+  // A mistake in the alert settings never stops the job; it shows here instead.
+  if (!job.alerts.notify) return job.alerts.problems.length ? `alerts: PROBLEM in job.json: ${job.alerts.problems.join('; ')}` : 'alerts: off (add "notify_failure": "<bot>" to job.json)';
+  const fresh = notifyStatus && Date.now() - Date.parse(notifyStatus.heartbeat_at) < 3 * HEARTBEAT_MS;
+  if (!notifyStatus) return `alerts: → ${job.alerts.notify}, but webdata-notify isn't installed or hasn't run yet`;
+  if (!fresh) return `alerts: → ${job.alerts.notify}, but webdata-notify isn't running (last seen ${ago(notifyStatus.heartbeat_at)})`;
+  const s = notifyStatus.jobs?.[job.name];
+  if (!s || s.notify !== job.alerts.notify) return `alerts: → ${job.alerts.notify} (webdata-notify picks this up within a minute)`;
+  return `alerts: ${s.alerts}${s.state && s.state !== 'ok' ? ` · ${s.state}: ${s.detail}` : ''}`;
 }
 
 // ---------------------------------------------------------------- daemon
@@ -534,20 +559,35 @@ named <table>.json (a JSON array of objects), .ndjson, .csv or .parquet,
 using the same column names and types as the table already in the bot's
 database. Exit non-zero on ANY problem: nothing is written to the bot's
 database unless every declared table is produced and passes the checks.
+Exit 75 (TEMPFAIL) when the source can't be reached, any other code when it
+answered but not as expected: failure alerts treat the two differently.
 Print a short progress line or two; it goes to the run log.
 """
 import json
 import os
 import sys
+import urllib.error
 import urllib.request
 
 OUT = os.environ["WEBDATA_OUT"]
+TEMPFAIL = 75
 
 
 def fetch_json(url, timeout=30):
+    """GET url as JSON. Exits 75 when the source can't be reached or is overloaded
+    (network errors, timeouts, HTTP 429/5xx); other errors fail the run as broken."""
     req = urllib.request.Request(url, headers={"User-Agent": "webdata-job (+openmausbot)"})
-    with urllib.request.urlopen(req, timeout=timeout) as resp:
-        return json.load(resp)
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            return json.load(resp)
+    except urllib.error.HTTPError as e:
+        if e.code == 429 or e.code >= 500:
+            print(f"temporary: {url} answered HTTP {e.code}", file=sys.stderr)
+            sys.exit(TEMPFAIL)
+        raise
+    except (urllib.error.URLError, TimeoutError, ConnectionError) as e:
+        print(f"temporary: {url} could not be reached: {e}", file=sys.stderr)
+        sys.exit(TEMPFAIL)
 
 
 def write_table(name, rows):
@@ -570,14 +610,17 @@ const commands = {
   list() {
     const names = jobNames();
     if (!names.length) { console.log(`no jobs yet (create one: webdata-job new <name> ...)`); return; }
+    const notifyStatus = readJSON(NOTIFY_STATUS, null);
     for (const name of names) {
       const st = readStatus(name);
       let job;
       try { job = loadJob(name); } catch (e) { console.log(`${name}  INVALID: ${e.message.split('\n').slice(1).join('; ').trim()}`); continue; }
       const next = job.enabled ? nextRuns(job.cron, job.timezone, 1)[0] : null;
-      const last = st.last_finished ? `${st.last_ok ? 'ok' : `FAILED${st.consecutive_failures > 1 ? ` ×${st.consecutive_failures}` : ''}`} ${ago(st.last_finished)}` : 'never run';
+      const failed = `FAILED${st.failure_kind === 'temporary' ? ' (temporary)' : ''}${st.consecutive_failures > 1 ? ` ×${st.consecutive_failures}` : ''}`;
+      const last = st.last_finished ? `${st.last_ok ? 'ok' : failed} ${ago(st.last_finished)}${!st.last_ok && st.failing_since ? `, failing for ${fmtDuration(Date.now() - Date.parse(st.failing_since))}` : ''}` : 'never run';
       console.log(`${name}  ${job.enabled ? 'enabled ' : 'DISABLED'}  "${job.schedule}" ${job.timezone}  bot ${job.bot.name} → ${Object.keys(job.tables).join(', ')}`);
       console.log(`    last: ${st.running ? 'RUNNING now' : last}${st.last_error && !st.last_ok ? ` (${st.last_error})` : ''}   next: ${next ? `${fmtTime(next, job.timezone)} +${startOffset(name)}s` : '-'}`);
+      console.log(`    ${alertLine(job, notifyStatus)}`);
       if (job.description) console.log(`    ${job.description}`);
     }
   },
@@ -605,15 +648,12 @@ const commands = {
     process.stdout.write(fs.readFileSync(path.join(dir, runs.at(-1)), 'utf8'));
   },
 
-  async 'notify-test'([botName]) {
-    const bot = resolveBot(botName);
-    const url = webhookFor(bot.name);
-    if (!url) throw new Error(`no webhook for ${bot.name} in ${rel(NOTIFY_FILE)} (line: ${bot.name}=<webhook URL>)`);
-    const reply = await postWebhook(url, {
-      event: 'webdata.job.test', bot: bot.name, sent_at: stamp(),
-      note: 'Test from webdata-job notify-test. No job failed; reply that the notification arrived and do nothing else.',
-    });
-    console.log(`sent to ${bot.name}'s webhook: ${reply || 'ok'}`);
+  'notify-test'([name]) {
+    const job = loadJob(name);
+    if (!job.alerts.notify) throw new Error(`${name} has no "notify_failure" in job.json, so there is nothing to test`);
+    // webdata-notify (root) reads this request as data and sends the test itself.
+    fs.writeFileSync(path.join(stateDir(name), 'notify-test'), stamp() + '\n');
+    console.log(`asked webdata-notify to send ${job.alerts.notify} a test alert for ${name} (within a minute; see: webdata-job list)`);
   },
 
   enable([name]) { setEnabled(name, true); },
@@ -632,7 +672,7 @@ const commands = {
     if (!Object.keys(tables).length) throw new Error('give at least one --table <name>[:mode[:key,key]]');
     const schedule = String(f.schedule || '');
     parseCron(schedule);
-    const job = { description: String(f.description || ''), bot: bot.name, schedule, timezone: String(f.tz || 'UTC'), enabled: false, timeout_minutes: 10, tables };
+    const job = { description: String(f.description || ''), bot: bot.name, schedule, timezone: String(f.tz || 'UTC'), enabled: false, timeout_minutes: 10, tables, notify_failure: bot.name };
     fs.mkdirSync(dir, { recursive: true });
     writeJSON(path.join(dir, 'job.json'), job);
     const body = Object.keys(tables).map((t) => `    ${t} = []  # TODO: collect rows (dicts) for ${t}\n    write_table("${t}", ${t})`).join('\n');

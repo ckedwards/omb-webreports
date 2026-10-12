@@ -1,0 +1,129 @@
+#!/usr/bin/env node
+// webdata-access: who may see a database and the reports that read it.
+//
+//   webdata-access status               the site default, whether the internet can reach the
+//                                       site (Funnel), and each database's and report's access
+//   webdata-access set <database>       private, with a password read from standard input
+//                                       (12+ characters). Everyone signs in again.
+//   webdata-access public <database>    anyone who can reach the site
+//   webdata-access private <database>   password required (keeps the current one; with none,
+//                                       nobody can open it from outside this machine)
+//   webdata-access default <database>   remove the setting: follow the site default
+//
+// A database's access covers its file (DATA/<database>.duckdb), its other
+// files (DATA/<database>.*, DATA/<database>/...) and every report whose
+// report.json lists it. webdata-gate applies it to every request from outside
+// this machine; tools on this machine (webdata-check, webdata-sql, ...) are
+// not affected. Give the password on standard input, never as an argument:
+//   webdata-access set cary-news <<'EOF'
+//   the password
+//   EOF
+
+import fs from 'node:fs';
+import path from 'node:path';
+
+import { ACCESS_DEFAULT, ACCESS_DIR, PUBLISHED_DIR, REPORTS_DIR, SITE_URL } from './_config.mjs';
+import { accessOf, reportDatabases, hashPassword, writeSetting, removeSetting, reach, NAME, MIN_PASSWORD } from './_access.mjs';
+
+const [cmd, name, ...extra] = process.argv.slice(2);
+const die = (msg) => { console.error(msg); process.exit(1); };
+const readJSON = (f) => { try { return JSON.parse(fs.readFileSync(f, 'utf8')); } catch { return null; } };
+
+function usage(code) {
+  const text = fs.readFileSync(new URL(import.meta.url), 'utf8').split('\n').slice(1, 22).map((l) => l.replace(/^\/\/ ?/, '')).join('\n');
+  (code ? console.error : console.log)(text);
+  process.exit(code);
+}
+
+const databases = () => (readJSON(path.join(PUBLISHED_DIR, 'catalog.json'))?.databases ?? []).map((d) => String(d.name)).filter((n) => NAME.test(n));
+const reports = () => {
+  try { return fs.readdirSync(REPORTS_DIR, { withFileTypes: true }).filter((e) => e.isDirectory() && !/^[_.]/.test(e.name)).map((e) => e.name).sort(); }
+  catch { return []; }
+};
+const readers = (db) => reports().filter((slug) => reportDatabases(slug)?.databases.includes(db));
+
+function describe(db) {
+  const a = accessOf(db);
+  const how = a.broken ? `PRIVATE: its setting file (access/${db}.json) can't be read, so nobody can open it until it's fixed or reset`
+    : a.access === 'public' ? 'public'
+    : a.password ? `private, password set${a.changed_at ? ` ${a.changed_at.slice(0, 16).replace('T', ' ')} UTC` : ''}`
+    : 'private, NO password: nobody can open it from outside this machine';
+  return `${how}${a.explicit ? '' : ' (the site default)'}`;
+}
+
+function checkName() {
+  if (!name) usage(2);
+  if (!NAME.test(name)) die(`"${name}" isn't a database name; see: webdata-access status`);
+  if (!databases().includes(name)) console.error(`note: no published database "${name}" yet (DATA/${name}.duckdb); the setting applies once it exists`);
+}
+
+async function readPassword() {
+  if (process.stdin.isTTY) die('give the password on standard input (not typed here, not as an argument):\n  webdata-access set <database> <<\'EOF\'\n  the password\n  EOF');
+  const chunks = [];
+  for await (const c of process.stdin) { chunks.push(c); if (Buffer.concat(chunks).length > 1024) die('password too long (1024 bytes at most)'); }
+  const pw = Buffer.concat(chunks).toString('utf8').replace(/\r?\n$/, '');
+  if (/[\r\n]/.test(pw)) die('the password must be one line');
+  if ([...pw].length < MIN_PASSWORD) die(`the password must be at least ${MIN_PASSWORD} characters (a few words work well)`);
+  return pw;
+}
+
+const affected = (db) => {
+  const r = readers(db);
+  return r.length ? `reports that read it: ${r.join(', ')}` : 'no report reads it yet';
+};
+
+switch (cmd) {
+  case 'status': {
+    const r = reach();
+    const where = r.reach === 'internet' ? 'the internet (Tailscale Funnel is on)'
+      : r.reach === 'tailnet' ? 'your tailnet only (Funnel is off)' : "unknown (couldn't ask tailscale)";
+    console.log(`site       ${SITE_URL}`);
+    console.log(`reachable  from ${where}`);
+    console.log(`default    databases without a setting are ${ACCESS_DEFAULT}`);
+    console.log('databases');
+    const dbs = databases();
+    if (!dbs.length) console.log('  none published yet');
+    for (const db of dbs) console.log(`  ${db.padEnd(18)} ${describe(db)}`);
+    console.log('reports');
+    for (const slug of reports()) {
+      const dbsOf = reportDatabases(slug)?.databases ?? [];
+      const priv = dbsOf.filter((db) => accessOf(db).access === 'private');
+      const how = !dbsOf.length ? `${ACCESS_DEFAULT} (reads no database, so it follows the site default)`
+        : priv.length ? `private: needs the password of ${priv.join(' and ')}` : 'public';
+      console.log(`  ${slug.padEnd(18)} ${how}`);
+    }
+    break;
+  }
+  case 'set': {
+    checkName();
+    const pw = await readPassword();
+    writeSetting(name, { access: 'private', password: hashPassword(pw), changed_at: new Date().toISOString() });
+    console.log(`${name} is private with the new password; every device must sign in again (${affected(name)}).`);
+    break;
+  }
+  case 'public': {
+    checkName();
+    writeSetting(name, { access: 'public', changed_at: new Date().toISOString() });
+    console.log(`${name} is public: anyone who can reach ${SITE_URL} can see it (${affected(name)}).`);
+    break;
+  }
+  case 'private': {
+    checkName();
+    // Keep the stored password as it is: only its hash is kept, so it can't be re-made.
+    const current = accessOf(name).password ? readJSON(path.join(ACCESS_DIR, `${name}.json`)) : null;
+    writeSetting(name, { access: 'private', ...(current?.password ? { password: current.password } : {}), changed_at: current?.changed_at ?? new Date().toISOString() });
+    console.log(current?.password
+      ? `${name} is private; its password is unchanged (${affected(name)}).`
+      : `${name} is private, but has no password: nobody can open it from outside this machine until one is set (webdata-access set ${name}).`);
+    break;
+  }
+  case 'default': {
+    checkName();
+    removeSetting(name);
+    console.log(`${name} follows the site default now: ${ACCESS_DEFAULT} (${affected(name)}).`);
+    break;
+  }
+  case undefined: case '-h': case '--help': usage(0); break;
+  default: usage(2);
+}
+if (extra.length) console.error(`note: ignored extra arguments: ${extra.join(' ')}`);

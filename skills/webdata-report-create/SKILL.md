@@ -170,10 +170,37 @@ each collection into a scheduled script:
 
 Skip this when the data only changes when the person asks you to change it.
 
-## 9. Hand it over
+## 9. Who can see it
+
+`webdata-access status` shows who can reach the site (your tailnet only, or
+the whole internet through Tailscale Funnel) and each database's and report's
+access. Access belongs to a **database**: making `cary-news` private makes its
+file, its other files and every report that reads it (its `report.json`
+`databases`) private. So `databases` must list every database the page reads.
+
+- **Reachable from your tailnet only**: don't ask about passwords; the person
+  can bring it up.
+- **Reachable from the internet** and the report's database is public: ask
+  before handing it over: "This site is open to the internet. Keep the report
+  public, or make <database> private with a password? (It also covers <other
+  reports that read it>.)" Then, as they choose:
+
+```bash
+webdata-access set <database> <<'EOF'
+<the password they gave, 12+ characters>
+EOF
+```
+
+Take the password from the person; never make one up, and never repeat it in
+your reply or anywhere else (not in files, notes or memory). If it's too
+short, say so and ask for a longer one (a few words work well).
+
+## 10. Hand it over
 
 Reply with the link `SITE/reports/<slug>/`,
 one line on what it shows, the data jobs that keep it fresh (or the ones you
 propose, waiting for a yes), and: "On iPhone: open in Safari → Share → Add to
-Home Screen." It's also listed on the front page,
-SITE/.
+Home Screen." If it's private: it asks for the password once per device (and
+once inside the home-screen app, which keeps its own sign-in). Public reports
+are also listed on the front page, SITE/; private ones only for devices
+that have signed in.

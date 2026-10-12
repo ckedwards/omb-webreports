@@ -21,7 +21,7 @@ files. The shared code and docs (`DOCS`, served `/lib/`, the gallery) are
 owned by root: read them, copy from them, never try to change them.
 
 ```
-SITE/                      (Apache, tailnet only)
+SITE/                      (webdata-gate → Apache; tailnet only, or the internet with Funnel)
 ├── /                      front page: lists reports and databases
 ├── /lib/                  shared runtime: kit.js, kit.css, report-errors.js, vendor/ (d3 7.9.0, Plot 0.6.17)
 ├── /reports/_gallery/     the design gallery (DOCS/webroot/reports/_gallery/)
@@ -46,6 +46,7 @@ DOCS/                      read-only
 │   ├── webdata-job        scheduled data jobs: new / run / list / logs / enable / notify-test
 │   ├── webdata-notify     failure alerts (a root service): status
 │   ├── webdata-admin      for people, with sudo: status / update / pair / skills (bots can't run it)
+│   ├── webdata-access     who can see each database and its reports: status / set / public / private
 │   ├── webdata-browse     headless Chrome for job scripts: render a page, return HTML/text/JS result
 │   ├── webdata-sync       snapshots, catalog, report index (runs as a service)
 │   └── webdata-bake       bakes each report's first render (run by webdata-sync)
@@ -305,8 +306,16 @@ are rewritten only when their content changes. Don't edit them by hand.
 - No offline mode: kit doesn't use service workers, so home-screen apps need the
   tailnet to load. (Over the HTTPS URL a report *could* register one; don't
   without asking, since it would fight the ETag freshness model.)
-- The HTTPS proxy is Tailscale config, not Apache: `tailscale serve status`;
-  remove with `tailscale serve --https=8443 off`.
+- The HTTPS proxy is Tailscale config, not Apache: `tailscale serve status`
+  (it points at webdata-gate, `127.0.0.1:8081`). Funnel, if on, opens it to the
+  internet: `webdata-access status` says which.
+- **Who can see what.** Access belongs to a database: `webdata-access set
+  <db>` (password on stdin) makes its file, its other files and every report
+  whose `report.json` lists it private; `public`, `private`, `default` change
+  it back. People then sign in once per device. The tools here (`webdata-check`,
+  `webdata-sql`, the bake) use Apache directly and see everything. Never write
+  a password into a file, note or reply; only its hash is kept. The
+  report-create and report-update skills say when to ask.
 - omb-webreports itself (DOCS, `/lib/`, the gallery, the tools) is installed and
   updated by a person, as root, from its repository (`sudo webdata-admin update`); bots
   can't change it.

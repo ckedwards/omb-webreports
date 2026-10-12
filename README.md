@@ -37,7 +37,9 @@ changes. Save any report to your iPhone home screen and it behaves like an app.
   starts a task in a bot to fix it, after waiting out short outages (and never
   for a dropped internet connection).
 - **Locked down by default.** Reachable only from your tailnet, read-only
-  (GET/HEAD), no server-side code, hardened Apache, sandboxed services. It also
+  (GET/HEAD), no server-side code in the pages, hardened Apache, sandboxed
+  services. Optionally open to the internet (Tailscale Funnel), with a
+  "wifi password" per database: its data and every report that reads it. It also
   isolates OpenMausBot from programs on the machine, so a bot's shell can't use
   OpenMausBot's local API to change its own skills, permissions or settings.
 - **Agent-ready.** Four [Agent Skills](skills/) (read, create and update reports;
@@ -56,7 +58,7 @@ changes. Save any report to your iPhone home screen and it behaves like an app.
  scheduled job ─────────▶ webroot/data/<bot>.duckdb + catalog.json
  (webdata-jobs service:            │  + reports/<slug>/initial.json: each report's first
   script → validate → apply)       │    render, baked in headless Chrome after every change
-                                   │  Apache, tailnet only, ETag + Cache-Control: no-cache
+                                   │  Apache (127.0.0.1) ← webdata-gate (passwords) ← tailscale serve/Funnel
                                    ▼
           phone / browser ── report = HTML + /lib/kit.js ── first render from the bake,
                              then DuckDB-WASM runs the SQL; polls ETags, re-renders on change
@@ -90,7 +92,7 @@ cd /usr/local/src/omb-webreports
 sudo admin/openmausbot-upgrade.sh    # OpenMausBot + native modules + matching browser DuckDB
 # 4–5: OpenMausBot service, Chrome (docs/setup.md)
 
-tailscale serve --bg --https=8443 http://$(tailscale ip -4):8080   # HTTPS for phones
+tailscale serve --bg --https=8443 http://127.0.0.1:8081   # HTTPS for phones (to webdata-gate)
 sudo admin/install.sh                # asks a few questions; Apache, services, tools on PATH
 webdata-info                         # locations, URL, versions, service status
 # later: sudo webdata-admin update   # git pull + install (sudo webdata-admin: every root task)
@@ -126,6 +128,7 @@ From a shell:
 | `webdata-bake <slug>` | re-bake a report's first render now (automatic after changes) |
 | `webdata-job list\|run\|logs\|enable\|disable` | scheduled data jobs |
 | `webdata-browse <url> --eval '<js>'` | headless Chrome for job scripts |
+| `webdata-access status\|set\|public\|private\|default` | who can see each database and the reports that read it (passwords) |
 | `sudo webdata-admin status\|update\|pair\|skills\|upgrade-openmausbot` | everything that needs root: install and update status, updating, pairing a new device, the bots' skills, upgrading OpenMausBot |
 
 ## Documentation

@@ -34,6 +34,7 @@ sudo webdata-admin upgrade-openmausbot --check
 | `webdata-sync` | `journalctl -u webdata-sync -f` (bakes log as `bake: …`) |
 | `webdata-jobs` | `journalctl -u webdata-jobs -f`; per run: `webdata-job logs <name>` |
 | `webdata-notify` | `journalctl -u webdata-notify -f`; state: `webdata-notify status` |
+| `webdata-gate` | `journalctl -u webdata-gate -f` (sign-ins and wrong passwords); access: `webdata-access status` |
 | `apache2` | `/var/log/apache2/webdata-access.log`, `webdata-error.log` |
 | `openmausbot` | `journalctl -u openmausbot -f` |
 
@@ -95,11 +96,14 @@ causes: a table or column was renamed in the bot's database; the report names a
 database not listed in its `report.json`.
 
 **The site doesn't load.** `webdata-info` (services), then
-`curl -I http://<LISTEN_IP>:<LISTEN_PORT>/`. Apache binds to `LISTEN_IP`; if
-that's the Tailscale address and Tailscale isn't up, Apache retries every 5 s
-until it is. For the HTTPS URL: `tailscale serve status`.
+`curl -I http://127.0.0.1:8081/` (the gate) and `curl -I http://127.0.0.1:8080/`
+(Apache). `tailscale serve status` must point the HTTPS address at the gate
+(`http://127.0.0.1:8081`); the installer repoints old setups that went to
+Apache directly.
 
-**403 Forbidden.** The client isn't in `ALLOWED_NETS`, the request isn't
+**A report asks for a password, or 401/403 on its data.** It reads a private
+database: `webdata-access status`. 401 means "sign in"; 403 means private
+with no password set (`webdata-access set <db>`), or the request isn't
 GET/HEAD, or the path contains a dotfile. A 403 on all reports means Apache
 lost read access to `DATA_DIR` (its ACLs): re-run
 `sudo /usr/local/src/omb-webreports/admin/install.sh`.
@@ -209,13 +213,14 @@ sudo rm /etc/systemd/system/webdata-{sync,jobs,notify}.service /etc/systemd/syst
 sudo rm -r /var/lib/omb-webreports-notify          # then delete the "omb-webreports job failures" webhooks in OpenMausBot
 sudo rm -r /etc/omb-webreports /etc/systemd/system/openmausbot.service.d/omb-webreports-loopback.conf
 sudo systemctl restart openmausbot                # back to OpenMausBot's default local trust
-sudo rm /etc/systemd/system/apache2.service.d/tailscale.conf
+sudo systemctl disable --now webdata-gate && sudo rm /etc/systemd/system/webdata-gate.service
+sudo rm -r /var/lib/omb-webreports-gate && sudo userdel omb-webreports-gate
 sudo a2dissite webdata && sudo a2disconf zz-reports-hardening
 sudo rm /etc/apache2/sites-available/webdata.conf /etc/apache2/conf-available/zz-reports-hardening.conf
 sudo rm /usr/local/bin/webdata-*
 sudo rm -r /usr/local/lib/omb-webreports /usr/local/src/omb-webreports /var/cache/omb-webreports
 sudo systemctl daemon-reload
-tailscale serve --https=8443 off
+tailscale serve --https=8443 off                  # and Funnel, if on: tailscale funnel --https=8443 off
 ```
 
 Apache stays installed; restore `/etc/apache2/ports.conf` (`Listen 80`) and

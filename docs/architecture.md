@@ -12,9 +12,10 @@ flowchart TB
         bake["webdata-bake<br/>headless Chrome"]
         content[("/var/lib/omb-webreports<br/>reports/ · data/ (yours)")]
         program[("/usr/local/lib/omb-webreports<br/>front page · lib/ · gallery (root's)")]
-        apache["apache2<br/>read-only, GET/HEAD"]
+        apache["apache2<br/>127.0.0.1, read-only, GET/HEAD"]
+        gate["webdata-gate<br/>password access"]
     end
-    ts["tailscale serve<br/>HTTPS, tailnet only"]
+    ts["tailscale serve (tailnet)<br/>or Funnel (internet), HTTPS"]
     client["Phone / browser<br/>report + kit.js + DuckDB-WASM"]
     cdn["jsDelivr"]
 
@@ -28,7 +29,8 @@ flowchart TB
     bake -- "first render's rows:<br/>initial.json" --> content
     content --> apache
     program --> apache
-    apache --> ts
+    apache --> gate
+    gate --> ts
     client -. "checks ETags<br/>every 15 s" .-> ts
     ts -- "pages, kit, bakes, snapshots" --> client
     cdn -- "DuckDB-WASM" --> client
@@ -40,7 +42,8 @@ the published files' ETags every 15 s (see [Data flow](#data-flow)).
 
 The three services run as you; `webdata-sync` and `webdata-jobs` are
 sandboxed (see [Security model](#security-model)). Apache runs as `www-data`
-and listens only on `LISTEN_IP:LISTEN_PORT`.
+and listens only on `127.0.0.1:LISTEN_PORT`; people reach it through
+`webdata-gate` (`127.0.0.1:GATE_PORT`), which tailscale serve points at.
 
 | Part | Where | What it does |
 |---|---|---|
@@ -48,6 +51,7 @@ and listens only on `LISTEN_IP:LISTEN_PORT`.
 | `webdata-bake` | `bin/webdata-bake`, started by `webdata-sync` | Bakes each report's first render: runs it in headless Chrome and saves the query results to `initial.json`. |
 | `webdata-jobs` | `bin/webdata-job daemon` | Cron scheduler for `jobs/*`: runs scripts, validates output, writes it into bot databases. |
 | Apache | `/etc/apache2/sites-available/webdata.conf` | Serves the shared site files from the program and `reports/`, `data/` from the content folder: static files only. |
+| `webdata-gate` | `bin/webdata-gate`, as `omb-webreports-gate` | The front door: password access per database, then passes requests to Apache unchanged. |
 | kit | `/lib/kit.js`, `kit.css` (in the program) | Browser runtime every report uses: DuckDB-WASM, live updates, result cache, baked first render, charts, tables, design tokens. |
 | Reports | `/var/lib/omb-webreports/reports/<slug>/` | One directory each: `index.html`, `report.json`, `icon.svg`. One home-screen app each. |
 | Tools | `bin/webdata-*` → `/usr/local/bin` | CLI for people and bots. |
@@ -224,13 +228,47 @@ write: reports, jobs, and the published data and state the services generate.
 - The services run the root-owned program as the owner, sandboxed.
 
 **Apache** (`admin/install.sh` writes it):
-- listens only on `LISTEN_IP:LISTEN_PORT`; `Require ip` limits clients to
-  `ALLOWED_NETS` (Tailscale ranges by default); only `GET`/`HEAD`;
+- listens only on `127.0.0.1:LISTEN_PORT` and answers only this machine
+  (`Require local`): webdata-gate and the local tools; only `GET`/`HEAD`;
+- no directory listings for `reports/` and `data/` (they would name private
+  reports and databases); the shared files keep theirs;
 - every served folder is untrusted content: no `.htaccess` (`AllowOverride None`), no
   symlinks, no CGI/SSI/handlers (`SetHandler None`), no content negotiation;
 - dotfiles and dot-directories are never served; `/` is denied by default;
 - version hidden, `TRACE` off, `nosniff`, `X-Frame-Options: SAMEORIGIN`,
   `Referrer-Policy: no-referrer`.
+
+**Password access (webdata-gate).** tailscale serve, and Funnel if the
+person opens the site to the internet, send every request to the gate. It
+works out which databases a request reveals: `DATA/<db>.*` and `DATA/<db>/…`
+reveal `<db>`; a report reveals the databases its `report.json` lists; the
+report index and data catalog are filtered per visitor; the shared files (`/`,
+`/lib`, the gallery) are public. Each database is public or private
+(`DATA_DIR/access/<db>.json`, set by `webdata-access`; none = `ACCESS_DEFAULT`
+from the root-owned config; a broken setting counts as private with no
+password, so it fails closed).
+- The password is stored as a scrypt hash. The right one sets a cookie for
+  that database (HttpOnly, SameSite=Lax, Secure on HTTPS, one year) signed
+  with a key only the gate's user can read, over the password's salt: a new
+  password invalidates every cookie for it. Bots can set passwords (anyone who
+  can use the bots is meant to know them) but can't forge cookies.
+- The path is decoded and normalized first; `.`/`..` segments, encoded slashes
+  and NULs are refused, and Apache is asked for exactly the normalized path,
+  so the gate and Apache can't disagree about which file a request means.
+- The password form is served at the private page's own address (iPhone
+  home-screen apps keep their own cookies and send other addresses to a
+  separate browser). It names neither the report nor the database.
+- Wrong passwords: 5 free tries, then one every 1, 2, 4… s (at most a minute)
+  per database, and one check at a time. tailscale serve and Funnel send
+  everyone from 127.0.0.1, so there's no per-visitor address to limit by;
+  that's why passwords need 12+ characters.
+- The gate's unit: its own system user, read access only to the reports'
+  `report.json` and `access/` (ACLs), localhost only, read-only system, no
+  capabilities. The tools on this machine (`webdata-check`, the bake) use
+  Apache directly and see everything, as bots could anyway.
+- What it isn't: per-person accounts or audit. Report and database names can
+  be probed (a missing report is a 404, a private one asks for a password);
+  their contents can't.
 
 **Filesystem.** Apache's user reads the program's site files (world-readable)
 and gets traverse-only (`x`) on the content folder plus read-only ACLs on its

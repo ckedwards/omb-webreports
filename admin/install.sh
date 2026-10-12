@@ -23,9 +23,10 @@
 #                                      which source and commit is installed
 #   DATA_DIR (/var/lib/omb-webreports) your reports, published data, jobs and state,
 #                                      owned by WEBREPORTS_OWNER (who runs OpenMausBot)
-#   Apache (dedicated to this site), webdata-sync, webdata-jobs, webdata-notify
-#   (failure alerts, root), the OpenMausBot isolation drop-in and session timer,
-#   and the webdata-* tools in /usr/local/bin.
+#   Apache (dedicated to this site, on 127.0.0.1 only), webdata-gate (the front
+#   door tailscale serve/Funnel send people to: password access), webdata-sync,
+#   webdata-jobs, webdata-notify (failure alerts, root), the OpenMausBot isolation
+#   drop-in and session timer, and the webdata-* tools in /usr/local/bin.
 set -euo pipefail
 
 SRC=$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/.." && pwd)
@@ -52,7 +53,8 @@ PREFIX=/usr/local/lib/omb-webreports
 CONF_DIR=/etc/omb-webreports
 CONFIG=$CONF_DIR/config.env
 LOOPBACK_DROPIN=/etc/systemd/system/openmausbot.service.d/omb-webreports-loopback.conf
-TOOLS=(webdata-info webdata-ls webdata-sql webdata-check webdata-new-report webdata-job webdata-browse webdata-errors webdata-sync webdata-bake webdata-skills webdata-notify webdata-admin)
+TOOLS=(webdata-info webdata-ls webdata-sql webdata-check webdata-new-report webdata-job webdata-browse webdata-errors webdata-sync webdata-bake webdata-skills webdata-notify webdata-admin webdata-access)
+GATE_USER=omb-webreports-gate
 NODE=$(command -v node || true)
 [[ -n $NODE ]] || die "node not found (Node.js 20+ is required; see docs/setup.md)"
 asowner() { if (( TEST )); then "$@"; else runuser -u "$WEBREPORTS_OWNER" -- "$@"; fi; }
@@ -83,15 +85,17 @@ first_run_config() {
   id "$WEBREPORTS_OWNER" >/dev/null 2>&1 || die "user $WEBREPORTS_OWNER does not exist"
   local home; home=$(getent passwd "$WEBREPORTS_OWNER" | cut -d: -f6)
   ask DATA_DIR "Where your reports, published data and jobs live" /var/lib/omb-webreports
-  ask LISTEN_IP "Address Apache listens on" "$(tailscale ip -4 2>/dev/null | head -1 || true)"
-  [[ -n $LISTEN_IP ]] || die "LISTEN_IP is required (Tailscale wasn't found to suggest one)"
-  ask LISTEN_PORT "Port" 8080
+  LISTEN_IP=127.0.0.1
+  ask LISTEN_PORT "Port for Apache (on 127.0.0.1; people reach it through webdata-gate)" 8080
   [[ $LISTEN_PORT =~ ^[0-9]+$ ]] || die "LISTEN_PORT must be a number"
-  ask ALLOWED_NETS "Networks allowed to read the site" "100.64.0.0/10 fd7a:115c:a1e0::/48"
-  local site_def="http://$LISTEN_IP:$LISTEN_PORT" https
-  https=$(tailscale serve status 2>/dev/null | awk -v t="$LISTEN_IP:$LISTEN_PORT" '/^https:\/\//{u=$1} index($0,t){if(u)print u; exit}' || true)
-  [[ -n $https ]] && site_def=${https%/}
-  ask SITE_URL "The address people open (the HTTPS one, if you use tailscale serve)" "$site_def"
+  ask GATE_PORT "Port for webdata-gate, the front door tailscale serve sends people to" 8081
+  [[ $GATE_PORT =~ ^[0-9]+$ && $GATE_PORT != "$LISTEN_PORT" ]] || die "GATE_PORT must be a number other than LISTEN_PORT"
+  ask ACCESS_DEFAULT "Databases and reports without a password setting are (public / private)" public
+  [[ $ACCESS_DEFAULT =~ ^(public|private)$ ]] || die "ACCESS_DEFAULT must be public or private"
+  local site_def="http://127.0.0.1:$GATE_PORT" https
+  https=$(tailscale serve status 2>/dev/null | awk '/^https:\/\//{print $1; exit}' || true)
+  [[ -n $https ]] && site_def=${https%/}:8443
+  ask SITE_URL "The address people open (the HTTPS one tailscale serve gives the gate)" "$site_def"
   ask OMB_DATA_DIR "OpenMausBot's data folder" "$home/.openmausbot"
   ask NODE_MODULES_DIR "Global node_modules with OpenMausBot's native modules" /usr/lib/node_modules
   ask OMB_LOOPBACK_TRUST "Isolate OpenMausBot from local programs, bots included (service / owner / empty)" service
@@ -116,9 +120,10 @@ first_run_config() {
 WEBREPORTS_OWNER=$WEBREPORTS_OWNER
 DATA_DIR=$DATA_DIR
 PLATFORM_DIR=$PREFIX/webroot
-LISTEN_IP=$LISTEN_IP
+LISTEN_IP=127.0.0.1
 LISTEN_PORT=$LISTEN_PORT
-ALLOWED_NETS="$ALLOWED_NETS"
+GATE_PORT=$GATE_PORT
+ACCESS_DEFAULT=$ACCESS_DEFAULT
 SITE_URL=$SITE_URL
 OMB_DATA_DIR=$OMB_DATA_DIR
 NODE_MODULES_DIR=$NODE_MODULES_DIR
@@ -142,10 +147,22 @@ fi
 # shellcheck disable=SC1090
 source "$D$CONFIG"
 grep -q '^PLATFORM_DIR=' "$D$CONFIG" || echo "PLATFORM_DIR=$PREFIX/webroot" >> "$D$CONFIG"
-: "${WEBREPORTS_OWNER:?} ${DATA_DIR:?} ${LISTEN_IP:?}"
+: "${WEBREPORTS_OWNER:?} ${DATA_DIR:?}"
 LISTEN_PORT=${LISTEN_PORT:-8080}
-ALLOWED_NETS=${ALLOWED_NETS:-"100.64.0.0/10 fd7a:115c:a1e0::/48"}
-SITE_URL=${SITE_URL:-http://$LISTEN_IP:$LISTEN_PORT}
+# Older installs had Apache on the tailnet address: it moves behind webdata-gate.
+OLD_LISTEN_IP=${LISTEN_IP:-}
+if [[ ${LISTEN_IP:-} != 127.0.0.1 ]]; then
+  if grep -q '^LISTEN_IP=' "$D$CONFIG"; then sed -i 's/^LISTEN_IP=.*/LISTEN_IP=127.0.0.1/' "$D$CONFIG"; else echo "LISTEN_IP=127.0.0.1" >> "$D$CONFIG"; fi
+  [[ -n $OLD_LISTEN_IP ]] && echo "Apache moves from $OLD_LISTEN_IP:$LISTEN_PORT to 127.0.0.1:$LISTEN_PORT, behind webdata-gate (LISTEN_IP in $CONFIG)."
+fi
+LISTEN_IP=127.0.0.1
+grep -q '^GATE_PORT=' "$D$CONFIG" || echo "GATE_PORT=8081" >> "$D$CONFIG"
+grep -q '^ACCESS_DEFAULT=' "$D$CONFIG" || echo "ACCESS_DEFAULT=public" >> "$D$CONFIG"
+GATE_PORT=${GATE_PORT:-8081}
+ACCESS_DEFAULT=${ACCESS_DEFAULT:-public}
+[[ $ACCESS_DEFAULT =~ ^(public|private)$ ]] || die "ACCESS_DEFAULT in $CONFIG must be public or private"
+[[ $GATE_PORT =~ ^[0-9]+$ && $GATE_PORT != "$LISTEN_PORT" ]] || die "GATE_PORT in $CONFIG must be a number other than LISTEN_PORT"
+SITE_URL=${SITE_URL:-http://127.0.0.1:$GATE_PORT}
 HOME_DIR=$(getent passwd "$WEBREPORTS_OWNER" | cut -d: -f6)
 OMB_DATA_DIR=${OMB_DATA_DIR:-$HOME_DIR/.openmausbot}
 NODE_MODULES_DIR=${NODE_MODULES_DIR:-/usr/lib/node_modules}
@@ -179,8 +196,9 @@ served_dir() {
   cat <<EOF
     <Directory $1>
         # No .htaccess, no symlinks, no CGI/SSI, no content negotiation, no
-        # handlers. Indexes on so the tree can be browsed.
-        Options Indexes
+        # handlers. Listings only for the shared files: elsewhere a listing
+        # would name private reports and databases.
+        Options ${2:-None}
         AllowOverride None
         AllowOverrideList None
         SetHandler None
@@ -230,15 +248,16 @@ put /etc/apache2/sites-available/webdata.conf <<EOF
     Alias /reports $DATA_DIR/reports
     Alias /data $DATA_DIR/data
 
-$(served_dir "$PREFIX/webroot")
+$(served_dir "$PREFIX/webroot" Indexes)
 $(served_dir "$DATA_DIR/reports")
 $(served_dir "$DATA_DIR/data")
 
-    # Read-only, and only from the allowed networks.
+    # Read-only, and only from this machine: people come through webdata-gate
+    # (password access), the tools on this machine directly.
     <Location "/">
         <RequireAll>
             Require method GET HEAD
-            Require ip $ALLOWED_NETS
+            Require local
         </RequireAll>
     </Location>
     # Never serve dotfiles or dot-dirs.
@@ -271,17 +290,53 @@ $(served_dir "$DATA_DIR/data")
 </VirtualHost>
 EOF
 
-# Apache binds to LISTEN_IP, which (with Tailscale) may not exist yet at boot.
-put /etc/systemd/system/apache2.service.d/tailscale.conf <<'EOF'
+# The front door. Its own system user: the key that signs visitors' cookies is
+# in its StateDirectory, which neither the owner (and so bots) nor Apache can
+# read. It may read only the reports' report.json and the access settings (ACLs
+# below), and talk only to Apache on this machine.
+put /etc/systemd/system/webdata-gate.service <<EOF
 # Written by omb-webreports admin/install.sh.
 [Unit]
-After=tailscaled.service network-online.target
-Wants=network-online.target
-StartLimitIntervalSec=0
+Description=omb-webreports gate: password access in front of Apache
+After=network.target apache2.service
 
 [Service]
-Restart=on-failure
-RestartSec=5
+Type=simple
+User=$GATE_USER
+Group=$GATE_USER
+ExecStart=$NODE $PREFIX/bin/webdata-gate
+Restart=always
+RestartSec=2
+StateDirectory=omb-webreports-gate
+StateDirectoryMode=0700
+UMask=0077
+NoNewPrivileges=yes
+CapabilityBoundingSet=
+AmbientCapabilities=
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectSystem=strict
+ProtectHome=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+ProtectHostname=yes
+ProtectProc=invisible
+RestrictNamespaces=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+IPAddressDeny=any
+IPAddressAllow=localhost
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
+SystemCallErrorNumber=EPERM
+
+[Install]
+WantedBy=multi-user.target
 EOF
 
 # Both services run the root-owned program as the owner, and may write only DATA_DIR
@@ -438,6 +493,9 @@ fi
 
 # --- packages --------------------------------------------------------------------
 (( TEST )) || apt-get install -y -qq apache2 acl >/dev/null
+if (( ! TEST )) && ! id "$GATE_USER" >/dev/null 2>&1; then
+  useradd --system --no-create-home --home-dir /nonexistent --shell /usr/sbin/nologin "$GATE_USER"
+fi
 
 # --- the program: a root-owned copy of just what runs and what agents read --------
 PROGRAM_DIRS=(bin skills templates examples docs webroot/lib webroot/reports/_gallery)
@@ -468,7 +526,7 @@ OMB_WEBREPORTS_CONFIG=$D$CONFIG PLATFORM_DIR=$D$PREFIX/webroot "$NODE" "$D$PREFI
 # --- DATA_DIR: the owner's; Apache may read only reports/ and data/ -----------------
 mkdir -p "$D$DATA_DIR"
 if (( ! TEST )); then chown "$OWNER:$OWNER" "$D$DATA_DIR"; chmod 0750 "$D$DATA_DIR"; fi
-asowner mkdir -p "$D$DATA_DIR/reports" "$D$DATA_DIR/data" "$D$DATA_DIR/jobs" "$D$DATA_DIR/.state"
+asowner mkdir -p "$D$DATA_DIR/reports" "$D$DATA_DIR/data" "$D$DATA_DIR/jobs" "$D$DATA_DIR/.state" "$D$DATA_DIR/access"
 
 if [[ -n $MIGRATE ]]; then
   echo "migrating content from $MIGRATE (as $OWNER):"
@@ -496,6 +554,15 @@ if (( ! TEST )); then
   # As the owner, never following links: these trees are the owner's (and bots') to fill.
   runuser -u "$OWNER" -- setfacl -R -P -m u:www-data:rX "$DATA_DIR/reports" "$DATA_DIR/data"
   runuser -u "$OWNER" -- setfacl -R -P -d -m u:www-data:rX "$DATA_DIR/reports" "$DATA_DIR/data"
+  # The gate reads the reports' report.json and the access settings, nothing else.
+  setfacl -m "u:$GATE_USER:x" "$DATA_DIR"
+  dir=$(dirname "$DATA_DIR")
+  while [[ $dir != / ]]; do
+    runuser -u "$GATE_USER" -- test -x "$dir" || setfacl -m "u:$GATE_USER:x" "$dir"
+    dir=$(dirname "$dir")
+  done
+  runuser -u "$OWNER" -- setfacl -R -P -m "u:$GATE_USER:rX" "$DATA_DIR/reports" "$DATA_DIR/access"
+  runuser -u "$OWNER" -- setfacl -R -P -d -m "u:$GATE_USER:rX" "$DATA_DIR/reports" "$DATA_DIR/access"
   if [[ -n $MIGRATE ]]; then
     # The old layout let www-data through the folders above the old checkout.
     dir=$MIGRATE
@@ -513,6 +580,9 @@ if (( ! TEST )); then
     rm -f /etc/systemd/system/webdata-config.path /etc/systemd/system/webdata-config.service
   fi
   rm -f /usr/local/sbin/webdata-apply-config /usr/local/bin/new-report
+  # Apache no longer binds the tailnet address, so it needn't wait for Tailscale.
+  rm -f /etc/systemd/system/apache2.service.d/tailscale.conf
+  rmdir /etc/systemd/system/apache2.service.d 2>/dev/null || true
   rm -rf /etc/apache2/webdata /run/webdata
   a2dissite -q reports 2>/dev/null || true
   rm -f /etc/apache2/sites-available/reports.conf
@@ -561,8 +631,27 @@ apache2ctl configtest
 
 # --- services ----------------------------------------------------------------------------
 systemctl daemon-reload
-systemctl enable -q apache2 webdata-sync.service webdata-jobs.service webdata-notify.service
-systemctl restart apache2 webdata-sync.service webdata-jobs.service
+systemctl enable -q apache2 webdata-gate.service webdata-sync.service webdata-jobs.service webdata-notify.service
+systemctl restart apache2 webdata-gate.service webdata-sync.service webdata-jobs.service
+
+# --- tailscale serve: people go to the gate, never straight to Apache -----------------
+# Older installs pointed tailscale serve (and maybe Funnel) at Apache's tailnet
+# address, which Apache no longer listens on. Repoint those handlers at the gate,
+# keeping Funnel on wherever it was on.
+if command -v tailscale >/dev/null 2>&1 && st=$(tailscale serve status --json 2>/dev/null); then
+  while IFS=' ' read -r port funnel; do
+    [[ -n $port ]] || continue
+    if [[ $funnel == 1 ]]; then tailscale funnel --bg --https="$port" "http://127.0.0.1:$GATE_PORT" >/dev/null
+    else tailscale serve --bg --https="$port" "http://127.0.0.1:$GATE_PORT" >/dev/null; fi
+    echo "tailscale: https port $port now goes to webdata-gate (127.0.0.1:$GATE_PORT)$( [[ $funnel == 1 ]] && echo ', Funnel kept on')"
+  done < <(OLD="${OLD_LISTEN_IP:-127.0.0.1}" PORT="$LISTEN_PORT" "$NODE" -e '
+    const st = JSON.parse(require("fs").readFileSync(0, "utf8") || "{}");
+    const apache = new Set([`http://${process.env.OLD}:${process.env.PORT}`, `http://127.0.0.1:${process.env.PORT}`, `http://localhost:${process.env.PORT}`]);
+    for (const [host, w] of Object.entries(st.Web || {})) {
+      const p = w?.Handlers?.["/"]?.Proxy?.replace(/\/$/, "");
+      if (apache.has(p)) console.log(host.split(":").pop(), st.AllowFunnel?.[host] ? 1 : 0);
+    }' <<<"$st")
+fi
 
 # --- OpenMausBot isolation ---------------------------------------------------------------
 omb_up() { for _ in $(seq 1 30); do curl -s -o /dev/null --max-time 2 "$OMB_URL/api/health" && return 0; sleep 1; done; return 1; }
@@ -616,11 +705,14 @@ echo
 echo "omb-webreports is installed$( (( UNSAFE )) && echo ' (UNSAFE: from a development checkout)')."
 echo "  program  $PREFIX  (from $SRC${commit:+ @ ${commit:0:12}})"
 echo "  content  $DATA_DIR"
-echo "  on       http://$LISTEN_IP:$LISTEN_PORT/  (site URL: $SITE_URL)"
+echo "  on       $SITE_URL  (webdata-gate on 127.0.0.1:$GATE_PORT; Apache on 127.0.0.1:$LISTEN_PORT; unset databases are $ACCESS_DEFAULT)"
 echo "  check    webdata-info; as root: sudo webdata-admin status"
 if [[ -n $MIGRATE ]]; then
   echo "  migrated from $MIGRATE: once the site looks right, delete that folder (its services now run from $PREFIX)"
 fi
-if [[ $SITE_URL == https://*.ts.net:* ]] && ! tailscale serve status 2>/dev/null | grep -q "$LISTEN_IP:$LISTEN_PORT"; then
-  echo "  HTTPS    not set up yet: tailscale serve --bg --https=${SITE_URL##*:} http://$LISTEN_IP:$LISTEN_PORT"
+if [[ $SITE_URL == https://*.ts.net:* ]] && ! tailscale serve status 2>/dev/null | grep -q "127.0.0.1:$GATE_PORT"; then
+  echo "  HTTPS    not set up yet: tailscale serve --bg --https=${SITE_URL##*:} http://127.0.0.1:$GATE_PORT"
 fi
+echo "  internet to open the site to everyone (set passwords first: webdata-access status):"
+echo "           sudo tailscale funnel --bg --https=${SITE_URL##*:} http://127.0.0.1:$GATE_PORT"
+

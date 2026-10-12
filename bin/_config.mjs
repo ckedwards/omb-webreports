@@ -10,10 +10,13 @@
 //   DATA_DIR      your content: reports, published data, jobs, state (owned by
 //                 WEBREPORTS_OWNER, the user OpenMausBot and its bots run as)
 //
+// Requests from people reach webdata-gate (GATE_PORT), which applies password
+// access and passes allowed ones to Apache; Apache itself listens only on
+// 127.0.0.1 (LOCAL_URL, which the tools on this machine use directly).
+//
 // Run directly (node _config.mjs) it prints the paths as KEY=value lines for
 // the shell tools.
 
-import { execFileSync } from 'node:child_process';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
@@ -36,11 +39,6 @@ function readEnv(file) {
 const file = readEnv(CONFIG_FILE);
 const pick = (key, fallback) => process.env[key] || file[key] || fallback;
 
-function tailscaleIp() {
-  try { return execFileSync('tailscale', ['ip', '-4'], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] }).trim().split('\n')[0]; }
-  catch { return ''; }
-}
-
 export const INSTALLED = Boolean(file.DATA_DIR);
 export const OWNER = pick('WEBREPORTS_OWNER', os.userInfo().username);
 export const DATA_DIR = pick('DATA_DIR', '/var/lib/omb-webreports');
@@ -52,10 +50,18 @@ export const STATE_DIR = path.join(DATA_DIR, '.state');
 export const SYNC_JSON = path.join(DATA_DIR, 'sync.json');
 
 const port = pick('LISTEN_PORT', '8080');
-export const LISTEN_IP = pick('LISTEN_IP', '') || tailscaleIp() || '127.0.0.1';
-export const SITE_URL = pick('SITE_URL', `http://${LISTEN_IP}:${port}`).replace(/\/$/, '');
-/** Apache directly (no HTTPS proxy): for tools on this machine. */
+/** Apache: this machine only (admin/install.sh binds it to 127.0.0.1). */
+export const LISTEN_IP = pick('LISTEN_IP', '127.0.0.1');
+export const GATE_PORT = pick('GATE_PORT', '8081');
+/** webdata-gate, where tailscale serve (and Funnel) send people. */
+export const GATE_URL = `http://127.0.0.1:${GATE_PORT}`;
+export const SITE_URL = pick('SITE_URL', GATE_URL).replace(/\/$/, '');
+/** Apache directly, past the gate: for tools on this machine (they see private reports too). */
 export const LOCAL_URL = `http://${LISTEN_IP.includes(':') ? `[${LISTEN_IP}]` : LISTEN_IP}:${port}`;
+/** Databases (and the reports that read them) with no access setting: public or private. */
+export const ACCESS_DEFAULT = pick('ACCESS_DEFAULT', 'public') === 'private' ? 'private' : 'public';
+/** Bots' access settings, one <database>.json each (webdata-access); read by webdata-gate. */
+export const ACCESS_DIR = path.join(DATA_DIR, 'access');
 export const OMB_DATA_DIR = pick('OMB_DATA_DIR', path.join(os.homedir(), '.openmausbot'));
 export const NODE_MODULES_DIR = pick('NODE_MODULES_DIR', '/usr/lib/node_modules');
 /** The DuckDB-WASM build reports load in the browser. It must contain the same

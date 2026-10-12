@@ -1,0 +1,53 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="robots" content="noindex">
+<meta name="color-scheme" content="light dark">
+<title>Private</title>
+<!-- Served by webdata-gate in place of a private page, at that page's own
+     address. Self-contained on purpose: nothing else is reachable yet. -->
+<style>
+  :root { --bg: #f6f7f9; --card: #ffffff; --ink: #14171c; --muted: #5d6673; --line: #d9dee5; --accent: #1f6feb; --danger: #c62828; }
+  @media (prefers-color-scheme: dark) {
+    :root { --bg: #0d0f12; --card: #171a1f; --ink: #eef1f5; --muted: #9aa3ae; --line: #2a3038; --accent: #4c8dff; --danger: #ef6b6b; }
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; min-height: 100%; background: var(--bg); color: var(--ink);
+    font: 16px/1.45 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; }
+  main { max-width: 360px; margin: 0 auto; padding: calc(env(safe-area-inset-top) + 18vh) 20px 40px; }
+  .card { background: var(--card); border: 1px solid var(--line); border-radius: 16px; padding: 24px 20px; }
+  .lock { width: 40px; height: 40px; border-radius: 12px; background: var(--bg); display: grid; place-items: center; margin-bottom: 14px; }
+  h1 { font-size: 20px; margin: 0 0 4px; }
+  p { margin: 0 0 18px; color: var(--muted); font-size: 14px; }
+  label { display: block; font-size: 13px; color: var(--muted); margin-bottom: 6px; }
+  input { width: 100%; font: inherit; color: var(--ink); background: var(--bg); border: 1px solid var(--line);
+    border-radius: 10px; padding: 11px 12px; }
+  input:focus { outline: 2px solid var(--accent); outline-offset: 1px; }
+  button { margin-top: 14px; width: 100%; font: inherit; font-weight: 600; color: #fff; background: var(--accent);
+    border: 0; border-radius: 10px; padding: 11px 12px; }
+  .error { color: var(--danger); font-size: 14px; margin: 12px 0 0; }
+  .error:empty { display: none; }
+</style>
+</head>
+<body>
+<main>
+  <div class="card">
+    <div class="lock" aria-hidden="true">
+      <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="4" y="11" width="16" height="10" rx="2"/><path d="M8 11V7a4 4 0 0 1 8 0v4"/></svg>
+    </div>
+    <h1>This page is private</h1>
+    <p>{{STEP}}Enter the password to see it on this device.</p>
+    <form method="post" action="{{ACTION}}" autocomplete="on">
+      <input type="hidden" name="step" value="{{STEP_INDEX}}">
+      <input type="text" name="username" value="omb-webreports" autocomplete="username" hidden>
+      <label for="password">Password</label>
+      <input id="password" name="password" type="password" autocomplete="current-password" required autofocus>
+      <button type="submit">Open</button>
+      <p class="error" role="alert">{{ERROR}}</p>
+    </form>
+  </div>
+</main>
+</body>
+</html>

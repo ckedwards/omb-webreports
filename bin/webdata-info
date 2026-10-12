@@ -12,8 +12,9 @@ import path from 'node:path';
 
 import os from 'node:os';
 
-import { ROOT, SITE_URL, OMB_DATA_DIR, NODE_MODULES_DIR, LISTEN_IP, DUCKDB_WASM_VERSION, OMB_URL, CONFIG_FILE, INSTALLED,
+import { ROOT, SITE_URL, OMB_DATA_DIR, NODE_MODULES_DIR, LOCAL_URL, GATE_URL, ACCESS_DEFAULT, DUCKDB_WASM_VERSION, OMB_URL, CONFIG_FILE, INSTALLED,
   REPORTS_DIR, JOBS_DIR, PUBLISHED_DIR, PLATFORM_DIR, DATA_DIR } from './_config.mjs';
+import { reach, accessOf } from './_access.mjs';
 import { SESSION_FILE } from './_skills.mjs';
 
 const just = { '--site': SITE_URL, '--reports': REPORTS_DIR, '--jobs': JOBS_DIR, '--data': PUBLISHED_DIR, '--docs': ROOT, '--root': ROOT };
@@ -52,6 +53,14 @@ async function isolationLine() {
   if (code === 401 || code === 403) return `on: local requests without a login are refused; ${session}`;
   return `off: any program on this machine, bots' shells included, can administer OpenMausBot (OMB_LOOPBACK_TRUST in config.env)`;
 }
+function accessLine() {
+  const r = reach().reach;
+  const where = r === 'internet' ? 'the INTERNET (Tailscale Funnel is on)' : r === 'tailnet' ? 'your tailnet only' : 'unknown (tailscale serve not pointed at the gate?)';
+  let dbs = [];
+  try { dbs = JSON.parse(fs.readFileSync(path.join(PUBLISHED_DIR, 'catalog.json'), 'utf8')).databases.map((d) => d.name); } catch {}
+  const priv = dbs.filter((n) => accessOf(n).access === 'private');
+  return `reachable from ${where}; databases without a setting are ${ACCESS_DEFAULT}; private: ${priv.length ? priv.join(', ') : 'none'}`;
+}
 const active = (unit) => { try { return execFileSync('systemctl', ['is-active', unit], { encoding: 'utf8' }).trim(); } catch (e) { return (e.stdout || 'unknown').trim(); } };
 
 console.log(`omb-webreports
@@ -66,7 +75,7 @@ console.log(`omb-webreports
   design gallery (copy from it)       ${path.join(PLATFORM_DIR, 'reports', '_gallery', 'index.html')}   → ${SITE_URL}/reports/_gallery/
   example report                      ${path.join(ROOT, 'examples', 'reports', 'blue-jays-2026', 'index.html')}
   OpenMausBot data                    ${OMB_DATA_DIR}
-  Apache listens on                   ${LISTEN_IP}
+  people come in through              webdata-gate ${GATE_URL}; Apache (tools on this machine) ${LOCAL_URL}
   settings                            ${CONFIG_FILE}
   installed from                      ${installedFrom()}`);
 console.log(`
@@ -78,7 +87,10 @@ versions
   node               ${process.versions.node}
 
 services
-${['openmausbot', 'apache2', 'webdata-sync', 'webdata-jobs', 'webdata-notify'].map((u) => `  ${u.padEnd(18)} ${active(u)}`).join('\n')}
+${['openmausbot', 'apache2', 'webdata-gate', 'webdata-sync', 'webdata-jobs', 'webdata-notify'].map((u) => `  ${u.padEnd(18)} ${active(u)}`).join('\n')}
+
+access (webdata-access status for each database and report)
+  ${accessLine()}
 
 OpenMausBot isolation
   ${await isolationLine()}`);

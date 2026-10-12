@@ -187,9 +187,12 @@ right address (the port is your choice; 8443 keeps 443 free for OpenMausBot's
 own `--tailscale` endpoint):
 
 ```bash
-tailscale serve --bg --https=8443 http://$(tailscale ip -4):8080
+tailscale serve --bg --https=8443 http://127.0.0.1:8081    # webdata-gate, which the installer starts
 tailscale serve status
 ```
+
+This keeps the site on your tailnet. To open it to the internet later, see
+[step 12](#12-optional-open-it-to-the-internet).
 
 ## 7. Install
 
@@ -204,8 +207,9 @@ The first run asks a few questions and writes the answers to
 |---|---|
 | The user that runs OpenMausBot (`WEBREPORTS_OWNER`) | the user who ran `sudo` |
 | Where your reports, published data and jobs live (`DATA_DIR`) | `/var/lib/omb-webreports` |
-| Address and port Apache listens on (`LISTEN_IP`, `LISTEN_PORT`) | `tailscale ip -4`, `8080` |
-| Networks allowed to read the site (`ALLOWED_NETS`) | Tailscale's ranges |
+| Apache's port, on 127.0.0.1 (`LISTEN_PORT`) | `8080` |
+| webdata-gate's port, what tailscale serve points at (`GATE_PORT`) | `8081` |
+| Databases without a password setting are (`ACCESS_DEFAULT`) | `public` |
 | The address people open (`SITE_URL`) | the `tailscale serve` HTTPS address from step 6, if there is one |
 | OpenMausBot's data folder, global node_modules | `~/.openmausbot`, `/usr/lib/node_modules` |
 | Isolate OpenMausBot from local programs (`OMB_LOOPBACK_TRUST`) | `service` (yes) |
@@ -221,10 +225,14 @@ It also looks up the DuckDB-WASM build matching OpenMausBot's DuckDB
 - creates `DATA_DIR`, owned by you: `reports/`, `data/`, `jobs/` (Apache may read
   only `reports/` and `data/`);
 - installs Apache and **dedicates it to this site**: it replaces
-  `/etc/apache2/ports.conf` to listen only on `LISTEN_IP:LISTEN_PORT`,
+  `/etc/apache2/ports.conf` to listen only on `127.0.0.1:LISTEN_PORT`,
   disables the default site, and installs a hardened virtual host (see
   [architecture](architecture.md#security-model)). Don't run it on a machine
   whose Apache serves other sites;
+- starts **webdata-gate** on `127.0.0.1:GATE_PORT` as its own system user
+  (`omb-webreports-gate`): the front door that applies password access
+  ([data and passwords](#12-optional-open-it-to-the-internet)) and passes
+  everything else to Apache;
 - installs and starts two services running as you, sandboxed:
   `webdata-sync` (publishes bot databases) and `webdata-jobs` (scheduled jobs);
 - **isolates OpenMausBot** (`OMB_LOOPBACK_TRUST=service`): programs on this
@@ -305,7 +313,7 @@ Nothing to do: `webdata-notify` sets up a webhook for each bot that a job's
 ## 11. Verify everything
 
 ```bash
-webdata-info                    # versions, paths, all five services "active", browser DuckDB "same as the server",
+webdata-info                    # versions, paths, all six services "active", browser DuckDB "same as the server",
                                 # OpenMausBot isolation "on" with a webdata-skills session
 webdata-check _gallery          # renders the design gallery on a headless iPhone: must print OK
 ```
@@ -316,3 +324,38 @@ component. To install a report as an app: Safari → Share → Add to Home Scree
 
 Next: ask a bot to make its first report. Day-to-day use, logs and
 troubleshooting are in [operations.md](operations.md).
+
+## 12. Optional: open it to the internet
+
+[Tailscale Funnel](https://tailscale.com/kb/1223/funnel) makes the site public:
+anyone with the link can open it, no Tailscale needed. Everything goes through
+webdata-gate, so first decide what stays private. Access belongs to a
+**database** (its file, its other files, and every report whose `report.json`
+lists it):
+
+```bash
+webdata-access status                      # who can reach the site; each database and report
+webdata-access set cary-news <<'EOF'       # private, with a password (12+ characters)
+the password
+EOF
+webdata-access public bramble              # or explicitly public
+```
+
+Bots can do this too (their skills ask the person before a report goes public
+on the internet). Then:
+
+```bash
+sudo tailscale funnel --bg --https=8443 http://127.0.0.1:8081
+```
+
+Funnel works on ports 443, 8443 and 10000. A private report shows a password
+form at its own address; the right password sets a cookie for that database
+for a year (HttpOnly, Secure, SameSite=Lax). On iPhone, a home-screen app keeps
+its own cookies, so it asks once inside the app too. A new password signs every
+device out of that database. Turn Funnel off with
+`sudo tailscale funnel --https=8443 off` (tailscale serve keeps the site on
+the tailnet).
+
+A different default at install (`ACCESS_DEFAULT=private` in `config.env`, then
+re-run the installer): databases without a setting, and reports that read no
+database, are then closed until `webdata-access` opens them.

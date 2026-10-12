@@ -3,8 +3,10 @@
 #
 #   webdata-check <slug> [out-dir]
 #
-# Runs webdata-sync --once (report.json warnings), then opens the report over
-# the HTTPS URL in headless Chrome at iPhone size, in light and dark mode, and
+# Runs webdata-sync --once (report.json warnings), then opens the report from
+# Apache on this machine (past webdata-gate, so private reports render too; a
+# localhost page counts as secure like HTTPS) in headless Chrome at iPhone size,
+# in light and dark mode, and
 # prints: render time, kit status, kit error banner, page/console errors and
 # horizontal overflow. Saves full-page screenshots to out-dir (default: a temp
 # dir) as light.png and dark.png. Look at both screenshots before calling a
@@ -13,10 +15,10 @@ set -uo pipefail
 
 ROOT=$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/.." && pwd)
 while IFS='=' read -r k v; do
-  case $k in REPORTS_DIR) REPORTS=$v ;; PUBLISHED_DIR) PUBLISHED=$v ;; PLATFORM_DIR) PLATFORM=$v ;; SITE_URL) SITE=$v ;; esac
+  case $k in REPORTS_DIR) REPORTS=$v ;; PUBLISHED_DIR) PUBLISHED=$v ;; PLATFORM_DIR) PLATFORM=$v ;; LOCAL_URL) LOCAL=$v ;; esac
 done < <(node "$ROOT/bin/_config.mjs")
 slug=${1:-}; out=${2:-}
-[[ -n $slug ]] || { sed -n '2,11p' "$0" | sed 's/^# \{0,1\}//'; exit 2; }
+[[ -n $slug ]] || { sed -n '2,12p' "$0" | sed 's/^# \{0,1\}//'; exit 2; }
 slug=${slug#/}; slug=${slug#reports/}; slug=${slug%/}
 # Reports live in REPORTS; the design gallery is part of the shared (platform) files.
 dir=$REPORTS/$slug; [[ $slug == _gallery ]] && dir=$PLATFORM/reports/_gallery
@@ -39,7 +41,7 @@ if [[ $slug != _* ]] && node -e 'process.exit((JSON.parse(require("fs").readFile
   "$ROOT/bin/webdata-sync" --once >/dev/null 2>&1   # links the bake from the page
 fi
 
-url="$SITE/reports/$slug/"
+url="$LOCAL/reports/$slug/"
 ab set device "iPhone 16 Pro" >/dev/null 2>&1
 for mode in light dark; do
   echo "== $mode  $url"

@@ -76,8 +76,8 @@ live ones:
 - **The site's own node:** `webdata-admin site status` and `webdata-access
   status` read a scratch `tailscaled --tun=userspace-networking --statedir=<dir>
   --socket=<dir>/ts.sock --port=0` (as yourself, never logged in) through
-  `WEBDATA_SITE_TS_SOCKET=<dir>/ts.sock`; run `bin/_admin-site.sh` with a stub
-  `runuser` on `PATH` (it drops `-u <user> --`). The loopback block
+  `WEBDATA_SITE_TS_SOCKET=<dir>/ts.sock` (`bin/_admin-site.sh status`; `login`
+  and `funnel` need root: tailscaled lets only root serve a Unix socket). The loopback block
   (`IPAddressDeny`) only holds in the system unit: a user unit ignores it. Check
   it on the real node from another tailnet machine (or this one, through
   Tailscale): `curl http://<node's 100.x address>:8080/` must fail.

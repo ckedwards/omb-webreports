@@ -26,8 +26,9 @@ TS_SOCKET=$(conf SITE_TS_SOCKET)
 SITE_HOSTNAME=$(conf SITE_HOSTNAME)
 SITE_URL=$(conf SITE_URL)
 
-# The site node's CLI, as the node's own user (full rights on its own daemon).
-ts() { runuser -u "$TS_USER" -- tailscale --socket="$TS_SOCKET" "$@"; }
+# The site node's CLI, as root: tailscaled lets only root (or a sudo-capable
+# operator) serve a Unix socket, even when the daemon runs as another user.
+ts() { tailscale --socket="$TS_SOCKET" "$@"; }
 # A field of `tailscale status --json` / `serve status --json` (JavaScript expression over `s`).
 jq_() { "$NODE" -e 'const s = JSON.parse(require("fs").readFileSync(0, "utf8") || "{}"); const v = eval(process.argv[1]); if (v != null) console.log(v)' "$1"; }
 

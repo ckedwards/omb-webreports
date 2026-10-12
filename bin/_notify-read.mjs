@@ -1,4 +1,3 @@
-#!/usr/bin/env node
 // Run by webdata-notify, as the owner (never as root): reads the jobs' job.json,
 // status.json, test requests and failure log tails, and prints them as one
 // JSON document. These files are the owner's, and so the bots', to write.

@@ -114,9 +114,14 @@ async function setup(args) {
   let check = await cf(token, '/user/tokens/verify');
   if (!check.ok) check = await cf(token, `/accounts/${account}/tokens/verify`);
   if (!check.ok) die(`Cloudflare didn't accept the token: ${cfError(check)}`);
-  const scripts = await cf(token, `/accounts/${account}/workers/scripts`);
-  if (!scripts.ok) die(`the token can't manage Workers in account ${account}: ${cfError(scripts)} (use the "Edit Cloudflare Workers" template)`);
+  // wrangler's first calls. (Listing the account's Workers succeeds even without
+  // permission, so it proves nothing.) 403: the token lacks Workers Scripts on this account.
   const sub = await cf(token, `/accounts/${account}/workers/subdomain`);
+  if (sub.status === 403 || sub.status === 401) {
+    die(`the token can't use Workers in account ${account}: ${cfError(sub)}.
+  Create a token from the "Edit Cloudflare Workers" template with Account Resources: Include → this account
+  (its summary must list "Workers Scripts: Edit"), then run setup again.`);
+  }
   const subdomain = sub.ok ? sub.body?.result?.subdomain : null;
 
   saveSecrets({ ...secrets, token });

@@ -3,7 +3,7 @@
 ## Everyday commands
 
 ```bash
-webdata-info                       # locations (SITE, REPORTS, JOBS, DATA, DOCS), versions, services, what's installed
+webdata-info                       # locations (SITE, PUBLIC, REPORTS, JOBS, DATA, DOCS), versions, services, what's installed
 webdata-ls                         # reports + databases (main tables)
 webdata-ls data                    # every table with columns and types
 webdata-ls <slug>                  # one report: link, files, tables it uses
@@ -15,17 +15,17 @@ webdata-sync --once                # one sync pass now; prints warnings (bad rep
 webdata-bake <slug>                # re-bake a report's first render now (the service does this itself)
 webdata-job list                   # scheduled jobs: last result, next run, alerts (see data-jobs.md)
 webdata-notify status              # failure alerts: webhooks per bot, each job's alert state
-webdata-access status              # who can reach the site; each database and report: public or private
+webdata-deploy status              # pages published to the internet: address, pages and their data, last deploy
 ```
 
 Everything that needs root is one command, `sudo webdata-admin` (bots can't
 use sudo, so they can't run it):
 
 ```bash
-sudo webdata-admin status          # install + available update, versions, services, isolation, bots' skills, failure alerts
+sudo webdata-admin status          # install + available update, versions, services, isolation, bots' skills, failure alerts, published pages
 sudo webdata-admin update          # update omb-webreports (below)
 sudo webdata-admin pair            # a pairing code for a new browser or device (full access; --chat-only)
-sudo webdata-admin site status     # the site's address(es), its own Tailscale node, Funnel
+sudo webdata-admin deploy status   # pages on the internet (Cloudflare); also setup, add, remove, password (below)
 sudo webdata-admin skills status   # bots with the omb-webreports skills: current or outdated
 sudo webdata-admin upgrade-openmausbot --check
 ```
@@ -37,7 +37,7 @@ sudo webdata-admin upgrade-openmausbot --check
 | `webdata-sync` | `journalctl -u webdata-sync -f` (bakes log as `bake: …`) |
 | `webdata-jobs` | `journalctl -u webdata-jobs -f`; per run: `webdata-job logs <name>` |
 | `webdata-notify` | `journalctl -u webdata-notify -f`; state: `webdata-notify status` |
-| `webdata-gate` | `journalctl -u webdata-gate -f` (sign-ins and wrong passwords); access: `webdata-access status` |
+| `webdata-deploy` | `journalctl -u webdata-deploy -f` (each deploy, notes, wrangler's errors); state: `webdata-deploy status` |
 | `apache2` | `/var/log/apache2/webdata-access.log`, `webdata-error.log` |
 | `openmausbot` | `journalctl -u openmausbot -f` |
 
@@ -54,15 +54,15 @@ log keeps them for `webdata-errors`.
 | What's installed (source, commit) | `/etc/omb-webreports/installed.json` | root |
 | The program (tools, skills, docs, shared site files) | `/usr/local/lib/omb-webreports` | root |
 | The source clone (installs and updates run from it) | `/usr/local/src/omb-webreports` | root |
-| Reports, published data, jobs, state, access settings | `/var/lib/omb-webreports` (`DATA_DIR`) | you |
-| The gate's cookie-signing key | `/var/lib/omb-webreports-gate/` | `omb-webreports-gate` |
+| Reports, published data, jobs, state | `/var/lib/omb-webreports` (`DATA_DIR`) | you |
+| Pages on the internet: settings (`deploy.json`), token and password (`deploy-secrets.json`, root only) | `/etc/omb-webreports/` | root |
+| Pages on the internet: `state.json`, the last deployed copy | `/var/lib/omb-webreports-deploy/` | `omb-webreports-deploy` |
 | Failure alerts: status, webhook secrets | `/var/lib/omb-webreports-notify/` | root |
 
 ## Settings
 
-- `/etc/omb-webreports/config.env`: owner, content folder, Apache's and the
-  gate's ports, the access default (`ACCESS_DEFAULT`), site URL, paths,
-  OpenMausBot isolation. Edit it as root,
+- `/etc/omb-webreports/config.env`: owner, content folder, Apache's port,
+  site URL, paths, OpenMausBot isolation. Edit it as root,
   then re-run `sudo /usr/local/src/omb-webreports/admin/install.sh`. The tools read it on
   each run.
 - `DATA_DIR/sync.json` (optional, yours to edit):
@@ -102,21 +102,20 @@ causes: a table or column was renamed in the bot's database; the report names a
 database not listed in its `report.json`.
 
 **The site doesn't load.** `webdata-info` (services), then
-`curl -I http://127.0.0.1:8081/` (the gate) and `curl -I http://127.0.0.1:8080/`
-(Apache). The HTTPS address must point at the gate: `sudo webdata-admin site
-status` shows the site's own node (`webdata-tailscale`, serving
-`unix:/run/omb-webreports-gate/gate.sock`; `journalctl -u webdata-tailscale`)
-and the machine's `tailscale serve` (`http://127.0.0.1:8081`). The installer
-repoints old setups that went to Apache directly. A site node that stopped
-working after months: its key expired (admin console → Machines → disable key
-expiry, then `sudo webdata-admin site login`).
-
-**A report asks for a password, or 401/403 on its data.** It reads a private
-database: `webdata-access status`. 401 means "sign in"; 403 means private
-with no password set (`webdata-access set <db>`), or the request isn't
-GET/HEAD, or the path contains a dotfile. A 403 on all reports means Apache
-lost read access to `DATA_DIR` (its ACLs): re-run
+`curl -I http://127.0.0.1:8080/` (Apache) and `tailscale serve status`: the
+site's port (8443) must go to `http://127.0.0.1:8080`. A 403 on all reports
+means Apache lost read access to `DATA_DIR` (its ACLs): re-run
 `sudo /usr/local/src/omb-webreports/admin/install.sh`.
+
+**A published page isn't updating, or isn't there.** `sudo webdata-admin deploy
+status`: the last deploy, anything pending, the last error, and notes. A note
+that a page "now also reads" a database means the internet keeps its last
+version until you approve: `sudo webdata-admin deploy add <slug>`. Errors come
+from wrangler (`journalctl -u webdata-deploy -n 50`): an expired or revoked
+token (`deploy setup` again), no `workers.dev` subdomain yet (open Workers &
+Pages in the dashboard once), or Cloudflare being unreachable; the service
+retries on its own, backing off up to 30 minutes. `sudo webdata-admin deploy
+now` tries again right away.
 
 **`engine_unavailable` / DuckDB did not load** (in OpenMausBot, or the
 tools fail to import `@duckdb/node-api`). The native modules are missing or
@@ -221,49 +220,45 @@ asks whether to continue; without a terminal it stops (exit 1). Add
 `--skip-browser-check` to upgrade regardless, accepting that reports run a
 different DuckDB until a matching build appears.
 
-## Passwords and the internet
+## Pages on the internet
 
-Access belongs to a database: its file, its other files and every report whose
-`report.json` lists it ([setup step 12](setup.md#12-optional-its-own-address-and-the-internet),
-[architecture](architecture.md#security-model)).
+Each page is published by a person ([setup step 12](setup.md#12-optional-pages-on-the-internet),
+[architecture](architecture.md#security-model)):
 
 ```bash
-webdata-access status                     # reachable from the tailnet or the internet; each database and report
-webdata-access set <db> <<'EOF'           # private with a new password (12+ characters): every device signs in again
-the password
-EOF
-webdata-access public|private|default <db>
-sudo webdata-admin site funnel on         # open to the internet
-sudo webdata-admin site funnel off        # back to the tailnet only (not `tailscale funnel ... off`: that removes the address)
-sudo webdata-admin site login <name>      # the site's own address, https://<name>.<tailnet>.ts.net/
+sudo webdata-admin deploy status            # the address, each page and its data, the last deploy
+sudo webdata-admin deploy add <slug>        # publish a page with the databases its report.json lists now
+sudo webdata-admin deploy remove <slug>
+sudo webdata-admin deploy password set|off  # one password for the whole published site
+sudo webdata-admin deploy now               # deploy without waiting
+sudo webdata-admin deploy setup             # the account, the Worker's name, a new token
+sudo webdata-admin deploy disable           # stop deploying (the site stays as last deployed)
 ```
 
-- A forgotten password can't be read back (only a hash is kept): set a new one.
-- To sign a device out, open `SITE_URL/_gate/logout`.
-- Wrong passwords slow down after five tries, per database; `journalctl -u
-  webdata-gate` shows sign-ins and failures (never the passwords).
-- Bots set passwords only when asked, with the password you give them, and
-  never repeat it.
+- Bots can change a published page and its data (that goes out within a
+  minute or two), never publish another page or database.
+- A forgotten password can't be read back from Cloudflare: set a new one
+  (every device signs in again). To sign one device out, open `<address>/_logout`.
+- To take the published site down, delete its Worker in the Cloudflare
+  dashboard (Workers & Pages → the Worker → Settings → Delete), then
+  `sudo webdata-admin deploy disable`.
 
 ## Uninstall
 
 ```bash
 sudo webdata-admin skills logout                  # revoke its OpenMausBot session
-sudo webdata-admin site logout                    # if the site has its own Tailscale node; then remove the machine in the admin console
-sudo rm /etc/systemd/system/webdata-tailscale.service && sudo userdel omb-webreports-tailscale
-sudo systemctl disable --now webdata-sync webdata-jobs webdata-notify webdata-omb-session.timer
-sudo rm /etc/systemd/system/webdata-{sync,jobs,notify}.service /etc/systemd/system/webdata-omb-session.{service,timer}
+sudo systemctl disable --now webdata-sync webdata-jobs webdata-notify webdata-deploy webdata-omb-session.timer
+sudo rm /etc/systemd/system/webdata-{sync,jobs,notify,deploy}.service /etc/systemd/system/webdata-omb-session.{service,timer}
 sudo rm -r /var/lib/omb-webreports-notify          # then delete the "omb-webreports job failures" webhooks in OpenMausBot
+sudo rm -r /var/lib/omb-webreports-deploy && sudo userdel omb-webreports-deploy   # and delete the Worker in the Cloudflare dashboard
 sudo rm -r /etc/omb-webreports /etc/systemd/system/openmausbot.service.d/omb-webreports-loopback.conf
 sudo systemctl restart openmausbot                # back to OpenMausBot's default local trust
-sudo systemctl disable --now webdata-gate && sudo rm /etc/systemd/system/webdata-gate.service
-sudo rm -r /var/lib/omb-webreports-gate && sudo userdel omb-webreports-gate
 sudo a2dissite webdata && sudo a2disconf zz-reports-hardening
 sudo rm /etc/apache2/sites-available/webdata.conf /etc/apache2/conf-available/zz-reports-hardening.conf
 sudo rm /usr/local/bin/webdata-*
 sudo rm -r /usr/local/lib/omb-webreports /usr/local/src/omb-webreports /var/cache/omb-webreports
 sudo systemctl daemon-reload
-sudo tailscale serve --https=8443 off             # the machine's address for the site (Funnel goes with it)
+sudo tailscale serve --https=8443 off             # the site's tailnet address
 ```
 
 Apache stays installed; restore `/etc/apache2/ports.conf` (`Listen 80`) and

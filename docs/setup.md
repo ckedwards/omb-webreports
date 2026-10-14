@@ -19,7 +19,7 @@ published data, jobs); the program itself is root's.
 9. [Teach your bots the skills](#9-teach-your-bots-the-skills)
 10. [Job failure notifications](#10-job-failure-notifications)
 11. [Verify everything](#11-verify-everything)
-12. [Optional: open it to the internet](#12-optional-its-own-address-and-the-internet)
+12. [Optional: pages on the internet](#12-optional-pages-on-the-internet)
 
 ## 1. Base packages
 
@@ -30,8 +30,8 @@ sudo apt-get install -y git curl ca-certificates python3 acl
 
 ## 2. Tailscale
 
-The site is reachable from your tailnet (and, only if you choose, the internet
-through Tailscale Funnel: step 12), and Tailscale also provides the HTTPS
+The site is reachable from your tailnet only (pages you choose can also go on
+the internet through Cloudflare: step 12), and Tailscale also provides the HTTPS
 certificate. Install it from Tailscale's repository (the commands for
 your release are at https://tailscale.com/download/linux), for example:
 
@@ -194,13 +194,13 @@ right address (the port is your choice; 8443 keeps 443 free for OpenMausBot's
 own `--tailscale` endpoint):
 
 ```bash
-tailscale serve --bg --https=8443 http://127.0.0.1:8081    # webdata-gate, which the installer starts
+sudo tailscale serve --bg --https=8443 http://127.0.0.1:8080    # Apache, which the installer sets up
 tailscale serve status
 ```
 
-This keeps the site on your tailnet. For an address of its own
-(`https://<name>.<tailnet>.ts.net/`) or to open it to the internet later, see
-[step 12](#12-optional-its-own-address-and-the-internet).
+This keeps the site on your tailnet: `https://<machine>.<tailnet>.ts.net:8443`.
+For pages on the internet, see [step 12](#12-optional-pages-on-the-internet);
+never Tailscale Funnel on this port (it would open every report and database).
 
 ## 7. Install
 
@@ -216,8 +216,6 @@ The first run asks a few questions and writes the answers to
 | The user that runs OpenMausBot (`WEBREPORTS_OWNER`) | the user who ran `sudo` |
 | Where your reports, published data and jobs live (`DATA_DIR`) | `/var/lib/omb-webreports` |
 | Apache's port, on 127.0.0.1 (`LISTEN_PORT`) | `8080` |
-| webdata-gate's port, what tailscale serve points at (`GATE_PORT`) | `8081` |
-| Databases without a password setting are (`ACCESS_DEFAULT`) | `public` |
 | The address people open (`SITE_URL`) | the `tailscale serve` HTTPS address from step 6, if there is one |
 | OpenMausBot's data folder, global node_modules | `~/.openmausbot`, `/usr/lib/node_modules` |
 | Isolate OpenMausBot from local programs (`OMB_LOOPBACK_TRUST`) | `service` (yes) |
@@ -230,24 +228,23 @@ It also looks up the DuckDB-WASM build matching OpenMausBot's DuckDB
   see [development](development.md));
 - copies just what runs into **`/usr/local/lib/omb-webreports`**, owned by root:
   the tools, skills, report template, the agent docs and the shared site files;
-- creates `DATA_DIR`, owned by you: `reports/`, `data/`, `jobs/`, `access/` (Apache
-  may read only `reports/` and `data/`; the gate only `reports/`, where it
-  opens each `report.json`, and `access/`);
+- creates `DATA_DIR`, owned by you: `reports/`, `data/`, `jobs/` (Apache, and
+  webdata-deploy's user, may read only `reports/` and `data/`);
 - installs Apache and **dedicates it to this site**: it replaces
   `/etc/apache2/ports.conf` to listen only on `127.0.0.1:LISTEN_PORT`,
   disables the default site, and installs a hardened virtual host (see
   [architecture](architecture.md#security-model)). Don't run it on a machine
   whose Apache serves other sites;
-- starts **webdata-gate** on `127.0.0.1:GATE_PORT` as its own system user
-  (`omb-webreports-gate`): the front door that applies password access
-  ([data and passwords](#12-optional-its-own-address-and-the-internet)) and passes
-  everything else to Apache;
 - installs and starts two services running as you, sandboxed:
   `webdata-sync` (publishes bot databases) and `webdata-jobs` (scheduled jobs),
   and `webdata-notify` (root, locked down): alerts a bot when one of its jobs
   keeps failing (step 10);
-- points existing `tailscale serve` (and Funnel) handlers that went to Apache at
-  the gate instead;
+- installs **wrangler** (Cloudflare's CLI, pinned by `deploy/package-lock.json`)
+  and the `webdata-deploy` service with its own user, `omb-webreports-deploy`;
+  the service starts once you set it up (step 12);
+- points `tailscale serve` handlers that went to the old password gate at
+  Apache (tailnet only, Funnel off), and removes what older versions had for
+  passwords and the internet (`webdata-gate`, the site's own Tailscale node);
 - **isolates OpenMausBot** (`OMB_LOOPBACK_TRUST=service`): programs on this
   machine, your bots' shells included, can no longer administer it without a
   login. webdata-skills gets a session of its own first, kept where only root
@@ -328,78 +325,82 @@ Nothing to do: `webdata-notify` sets up a webhook for each bot that a job's
 ## 11. Verify everything
 
 ```bash
-webdata-info                    # versions, paths, all six services "active", browser DuckDB "same as the server",
-                                # access (who can reach the site), OpenMausBot isolation "on" with a session
-sudo webdata-admin status       # also: updates available, bots' skills, failure alerts
-webdata-access status           # each database and report: public or private
+webdata-info                    # versions, paths, the services "active", browser DuckDB "same as the server",
+                                # OpenMausBot isolation "on" with a session
+sudo webdata-admin status       # also: updates available, bots' skills, failure alerts, published pages
 webdata-check _gallery          # renders the design gallery on a headless iPhone: must print OK
 ```
 
 Then open `SITE_URL/` on your phone: the front page lists your reports and
-the published databases (the public ones, and private ones this device has
-signed in to). Open `SITE_URL/reports/_gallery/` to see every
+the published databases. Open `SITE_URL/reports/_gallery/` to see every
 component. To install a report as an app: Safari → Share → Add to Home Screen.
 
 Next: ask a bot to make its first report. Day-to-day use, logs and
 troubleshooting are in [operations.md](operations.md).
 
-## 12. Optional: its own address, and the internet
+## 12. Optional: pages on the internet
 
-Two separate choices.
+The site itself stays on your tailnet. Pages you choose can also go on the
+internet: a static copy on [Cloudflare](https://www.cloudflare.com/) (a Worker
+with static assets, free plan), so nothing on this machine is exposed and it
+keeps working when this machine is off. `webdata-deploy`, a service, keeps the
+copy current: when a published page or its data changes, it deploys within a
+minute or two. Each page is published by a person, with `sudo`; bots can
+update a published page but never publish another.
 
-**Its own address.** The site shares the machine's name,
-`https://<machine>.<tailnet>.ts.net:8443`. To give it
-`https://<name>.<tailnet>.ts.net/` instead:
+**Once: a Cloudflare account and a token.**
 
-```bash
-sudo webdata-admin site login reports      # prints a link: approve the new machine "reports"
-```
-
-That starts `webdata-tailscale`, a second Tailscale node on this machine just
-for the site: a new machine in your tailnet with that name. It serves
-webdata-gate on port 443, and the command sets `SITE_URL` to the new address.
-Then, in the [admin console](https://login.tailscale.com/admin/machines), turn
-off key expiry for the new machine (⋯ → Disable key expiry), or the site goes
-offline when its key expires. The old `:8443` address keeps working until you
-remove it (`sudo tailscale serve --https=8443 off`); home-screen apps saved
-from it keep using it, so add them again from the new address. Funnel on this
-node opens only the site: OpenMausBot, on the machine's own address, stays on
-the tailnet. The node runs in userspace mode as its own user and can't reach
-this machine's loopback at all ([architecture](architecture.md#security-model)).
-`sudo webdata-admin site status` shows it; `sudo webdata-admin site logout`
-takes it away again.
-
-**The internet.** [Tailscale Funnel](https://tailscale.com/kb/1223/funnel) makes the site public:
-anyone with the link can open it, no Tailscale needed. Everything goes through
-webdata-gate, so first decide what stays private. Access belongs to a
-**database** (its file, its other files, and every report whose `report.json`
-lists it):
+1. Sign up at https://dash.cloudflare.com/sign-up (the free plan is enough).
+2. Open **Workers & Pages** once: Cloudflare asks you to choose your
+   `workers.dev` subdomain (e.g. `you` → `https://<name>.you.workers.dev`).
+   The **Account ID** is on that page too (Account details).
+3. **My Profile → API Tokens → Create Token**, template **Edit Cloudflare
+   Workers**. Under Account Resources choose your account; under Zone
+   Resources, *All zones from an account* is fine (it's only used for custom
+   domains). Create it and copy it (Cloudflare shows it once).
 
 ```bash
-webdata-access status                      # who can reach the site; each database and report
-webdata-access set cary-news <<'EOF'       # private, with a password (12+ characters)
-the password
-EOF
-webdata-access public bramble              # or explicitly public
+sudo webdata-admin deploy setup      # asks for the account ID, a name for the Worker, and the token
 ```
 
-Bots can do this too (their skills ask the person before a report goes public
-on the internet). Then:
+The Worker's name becomes the address: `https://<name>.<subdomain>.workers.dev/`.
+The token is checked with Cloudflare, then kept in
+`/etc/omb-webreports/deploy-secrets.json` (root only; the service gets it as a
+systemd credential). The first deploy, a minute later, puts up the front page
+only.
+
+**Each page you want public:**
 
 ```bash
-sudo webdata-admin site funnel on          # the site's own node, or else the machine's port in SITE_URL
+webdata-ls                                    # the reports and the databases each reads
+sudo webdata-admin deploy add cary-today      # the page, plus the databases its report.json lists now
+sudo webdata-admin deploy status              # the address, each page and its data, the last deploy
+sudo webdata-admin deploy remove cary-today   # off the internet with the next deploy
 ```
 
-The first time, Tailscale may print a link to allow Funnel in your tailnet's
-policy: open it, approve, and run the command again. Without a node of its own,
-the site's port must be 443, 8443 or 10000 (Funnel's ports). A private report shows a password
-form at its own address; the right password sets a cookie for that database
-for a year (HttpOnly, Secure, SameSite=Lax). On iPhone, a home-screen app keeps
-its own cookies, so it asks once inside the app too. A new password signs every
-device out of that database. Turn Funnel off with
-`sudo webdata-admin site funnel off`: the site stays on the tailnet. (Not
-`tailscale funnel ... off`, which removes the address altogether.)
+A published page takes its databases with it, and anyone with the link can
+download those whole (every table, not only what the page shows). When a bot's
+database holds more than should be public, have the bot build a database just
+for the page first. If a published page later starts reading another
+database, the internet keeps its last published version until you `add` it
+again (`deploy status` says so). The front page there lists only the published
+pages and databases.
 
-A different default at install (`ACCESS_DEFAULT=private` in `config.env`, then
-re-run the installer): databases without a setting, and reports that read no
-database, are then closed until `webdata-access` opens them.
+**A password (optional).** One password for the whole published site:
+
+```bash
+sudo webdata-admin deploy password set    # 12+ characters; asks twice
+sudo webdata-admin deploy password off
+```
+
+Visitors then get a password form at the page they opened; the right password
+sets a cookie for 400 days (HttpOnly, Secure, SameSite=Lax). On iPhone a
+home-screen app keeps its own cookies, so it asks once inside the app too. A
+new password signs every device out; `/_logout` signs one out. With a password,
+every request runs the Worker (the free plan allows 100,000 a day; an open
+report checks for new data every 15 seconds), and Cloudflare stores the
+password as the Worker's secret.
+
+`sudo webdata-admin deploy now` deploys without waiting; `deploy disable` stops
+deploying (the site stays online as last deployed: delete the Worker in the
+dashboard to take it down).

@@ -31,11 +31,11 @@ webdata-ls data         # every table with columns and types
 
 Give people the full HTTPS link, `SITE/reports/<slug>/`,
 and mention that on an iPhone, Safari → Share → Add to Home Screen installs it
-as an app. If `webdata-access status` shows the report as private, say it asks
-for a password once per device; never give out the password (you don't have
-it: only a hash is kept). The tools here (`webdata-ls`, `webdata-sql`,
-`webdata-check`) see private reports and data as usual; the password only
-applies to people opening the site.
+as an app. That link works on the person's tailnet. Pages a person published
+to the internet are also at `PUBLIC/reports/<slug>/` (`webdata-deploy status`
+lists them and the address): give that one to someone outside the tailnet. If
+the published site has a password, say it asks once per device; you don't
+have it.
 
 ## What a report shows
 

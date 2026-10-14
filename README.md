@@ -3,11 +3,12 @@
 **Live, phone-first data reports for your [OpenMausBot](https://www.npmjs.com/package/openmausbot) bots.**
 
 Your bots collect data into their DuckDB databases. omb-webreports publishes
-those databases to a private website (your tailnet; optionally the internet,
-with a password per database) where bots build
+those databases to a private website (your tailnet) where bots build
 **reports**: small, self-contained web apps with stat tiles, charts and
 tables that query the data in the browser and update themselves when it
 changes. Save any report to your iPhone home screen and it behaves like an app.
+Pages you choose can also go on the internet, on Cloudflare, kept up to date on
+their own (optionally behind one password).
 
 ![The design gallery on a desktop browser](docs/images/desktop-light.png)
 
@@ -39,11 +40,14 @@ changes. Save any report to your iPhone home screen and it behaves like an app.
   for a dropped internet connection).
 - **Locked down by default.** Reachable only from your tailnet, read-only
   (GET/HEAD), no server-side code in the pages, hardened Apache, sandboxed
-  services. Optionally its own address (`https://<name>.<tailnet>.ts.net/`) and
-  open to the internet (Tailscale Funnel), with a
-  "wifi password" per database: its data and every report that reads it. It also
-  isolates OpenMausBot from programs on the machine, so a bot's shell can't use
-  OpenMausBot's local API to change its own skills, permissions or settings.
+  services. It also isolates OpenMausBot from programs on the machine, so a
+  bot's shell can't use OpenMausBot's local API to change its own skills,
+  permissions or settings.
+- **Chosen pages on the internet.** `sudo webdata-admin deploy add <page>`
+  publishes a page and its data to Cloudflare (free plan; a static copy, so
+  this machine isn't exposed). After that its updates go out by themselves
+  within a minute or two. Bots can update a published page but never publish
+  another one; one optional password covers the whole published site.
 - **Agent-ready.** Four [Agent Skills](skills/) (read, create and update reports;
   schedule data jobs), a "Report builder" preset for OpenMausBot's New bot
   dialog, an agent guide ([READ_FIRST.md](READ_FIRST.md)), a design system
@@ -60,7 +64,8 @@ changes. Save any report to your iPhone home screen and it behaves like an app.
  scheduled job ─────────▶ DATA/<bot>.duckdb + catalog.json  (DATA: /var/lib/omb-webreports/data)
  (webdata-jobs service:            │  + reports/<slug>/initial.json: each report's first
   script → validate → apply)       │    render, baked in headless Chrome after every change
-                                   │  Apache (127.0.0.1) ← webdata-gate (passwords) ← tailscale serve/Funnel
+                                   │  Apache (127.0.0.1) ← tailscale serve (your tailnet)
+                                   │  webdata-deploy → Cloudflare (the pages you chose, and their data)
                                    ▼
           phone / browser ── report = HTML + /lib/kit.js ── first render from the bake,
                              then DuckDB-WASM runs the SQL; polls ETags, re-renders on change
@@ -79,7 +84,8 @@ More in [docs/architecture.md](docs/architecture.md).
 | Node.js | 24 (20+ required) | NodeSource packages. |
 | Apache httpd | 2.4.66 | Installed by `admin/install.sh`; **dedicated to this site** (it rewrites `ports.conf`). |
 | git | | The source is a root-owned clone; updates are `git pull`s (`admin/update.sh`). |
-| Tailscale | 1.104 | Private access + HTTPS via `tailscale serve`; optionally Funnel to open it to the internet. |
+| Tailscale | 1.104 | Private access + HTTPS via `tailscale serve`. |
+| Cloudflare account | free plan | Optional: chosen pages on the internet (a Worker with static assets), deployed with wrangler 4.150.0, which the installer installs (pinned). |
 | agent-browser + Chrome | 0.37.0 + Chrome for Testing 155 | `openmausbot browser install --with-deps`; used to check reports and to scrape JS-rendered pages. |
 | Python 3, `acl` | 3.14 | Python for job scripts; `acl` installed by the installer. |
 
@@ -94,11 +100,11 @@ cd /usr/local/src/omb-webreports
 sudo admin/openmausbot-upgrade.sh    # OpenMausBot + native modules + matching browser DuckDB
 # 4–5: OpenMausBot service, Chrome (docs/setup.md)
 
-tailscale serve --bg --https=8443 http://127.0.0.1:8081   # HTTPS for phones (to webdata-gate)
+sudo tailscale serve --bg --https=8443 http://127.0.0.1:8080   # HTTPS for phones (to Apache)
 sudo admin/install.sh                # asks a few questions; Apache, services, tools on PATH
 webdata-info                         # locations, URL, versions, service status
 # later: sudo webdata-admin update   # git pull + install (sudo webdata-admin: every root task)
-# optional: sudo webdata-admin site login <name>; site funnel on   (docs/setup.md, step 12)
+# optional: sudo webdata-admin deploy setup; deploy add <page>   (pages on the internet: docs/setup.md, step 12)
 ```
 
 The source is cloned **as root** on purpose: root runs the installer and the
@@ -117,7 +123,7 @@ Talk to your bot:
 - *"Make a report of the batting stats: leaders, OBP vs. SLG, a sortable table."*
 - *"Add a chart of runs per game to the season report."*
 - *"Create a cron task to update this data hourly."*
-- *"Make the Cary site private with the password …"* · *"Change the Cary site's password."*
+- *"Which pages are on the internet, and at what address?"*
 
 From a shell:
 
@@ -132,9 +138,9 @@ From a shell:
 | `webdata-bake <slug>` | re-bake a report's first render now (automatic after changes) |
 | `webdata-job list\|run\|logs\|enable\|disable` | scheduled data jobs |
 | `webdata-browse <url> --eval '<js>'` | headless Chrome for job scripts |
-| `webdata-access status\|set\|public\|private\|default` | who can see each database and the reports that read it (passwords) |
+| `webdata-deploy status` | pages published to the internet: the address, each page and its data, the last deploy |
 | `webdata-notify status` | failure alerts: each bot's webhook, each job's alert state |
-| `sudo webdata-admin status\|update\|pair\|skills\|upgrade-openmausbot` | everything that needs root: install and update status, updating, pairing a new device, the bots' skills, upgrading OpenMausBot |
+| `sudo webdata-admin status\|update\|pair\|skills\|deploy\|upgrade-openmausbot` | everything that needs root: install and update status, updating, pairing a new device, the bots' skills, publishing pages to the internet, upgrading OpenMausBot |
 
 ## Documentation
 
@@ -158,15 +164,16 @@ admin/install.sh         installs (as root, from a root-owned clone): the progra
 admin/update.sh          git pull + install (sudo webdata-admin update); --from-unsafe-dev for a development checkout
 admin/openmausbot-upgrade.sh  install/upgrade OpenMausBot + its native modules; keeps the
                          browser's DuckDB (DuckDB-WASM) on the same version as OpenMausBot's
-bin/                     the webdata-* tools, and the services' programs: webdata-gate (password
-                         access), webdata-notify (failure alerts), webdata-sync, webdata-job daemon
+bin/                     the webdata-* tools, and the services' programs: webdata-sync, webdata-job
+                         daemon, webdata-notify (failure alerts), webdata-deploy (pages to Cloudflare)
 config.example.env       every setting in /etc/omb-webreports/config.env, explained
+deploy/                  wrangler, pinned (package.json, package-lock.json), and the Worker and
+                         password page for a published site with a password
 docs/                    user documentation
 examples/reports/        a complete real report to study
 skills/                  Agent Skills for bots, and omb-webreports.openmaus.json (generated
                          OpenMausBot package: the skills + the Report builder preset)
 templates/report/        the starter report webdata-new-report copies
-templates/login.html     the password page webdata-gate shows for a private report
 webroot/                 the shared site files: front page, lib/ (kit), reports/_gallery/
 ```
 

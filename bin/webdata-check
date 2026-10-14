@@ -4,11 +4,10 @@
 #   webdata-check <slug> [out-dir]
 #
 # Runs webdata-sync --once (report.json warnings), then opens the report from
-# Apache on this machine (past webdata-gate, so private reports render too; a
-# localhost page counts as secure like HTTPS) in headless Chrome at iPhone size,
-# in light and dark mode, and
-# prints: render time, kit status, kit error banner, page/console errors and
-# horizontal overflow. Saves full-page screenshots to out-dir (default: a temp
+# Apache on this machine (a localhost page counts as secure like HTTPS) in
+# headless Chrome at iPhone size, in light and dark mode, and prints: render
+# time, kit status, kit error banner, page/console errors and horizontal
+# overflow. Saves full-page screenshots to out-dir (default: a temp
 # dir) as light.png and dark.png. Look at both screenshots before calling a
 # report done. Exit status 1 if any problem was found.
 set -uo pipefail

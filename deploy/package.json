@@ -1,0 +1,8 @@
+{
+  "name": "omb-webreports-deploy",
+  "private": true,
+  "description": "Cloudflare's wrangler, pinned, for bin/webdata-deploy. admin/install.sh installs it with npm ci.",
+  "dependencies": {
+    "wrangler": "4.150.0"
+  }
+}

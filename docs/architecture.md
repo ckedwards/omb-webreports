@@ -13,10 +13,11 @@ flowchart TB
         content[("/var/lib/omb-webreports<br/>reports/ · data/ (yours)")]
         program[("/usr/local/lib/omb-webreports<br/>front page · lib/ · gallery (root's)")]
         apache["apache2<br/>127.0.0.1, read-only, GET/HEAD"]
-        gate["webdata-gate<br/>password access"]
         notify["webdata-notify.service<br/>failure alerts (root)"]
+        deploy["webdata-deploy.service<br/>chosen pages → Cloudflare"]
     end
-    ts["tailscale serve (tailnet)<br/>or Funnel (internet), HTTPS<br/>the machine's or the site's own node"]
+    ts["tailscale serve<br/>HTTPS, your tailnet"]
+    cf["Cloudflare<br/>Worker with static assets<br/>(the internet)"]
     client["Phone / browser<br/>report + kit.js + DuckDB-WASM"]
     cdn["jsDelivr"]
 
@@ -30,10 +31,13 @@ flowchart TB
     bake -- "first render's rows:<br/>initial.json" --> content
     content --> apache
     program --> apache
-    apache --> gate
-    gate --> ts
+    apache --> ts
     client -. "checks ETags<br/>every 15 s" .-> ts
     ts -- "pages, kit, bakes, snapshots" --> client
+    content -. "published pages<br/>and their data" .-> deploy
+    program --> deploy
+    deploy -- "wrangler deploy" --> cf
+    cf -- "the same files,<br/>for published pages" --> client
     cdn -- "DuckDB-WASM" --> client
     jobs -. "status, as data" .-> notify
     notify -- "webhook: a task<br/>to fix the job" --> omb
@@ -45,10 +49,11 @@ the published files' ETags every 15 s (see [Data flow](#data-flow)).
 
 `webdata-sync` and `webdata-jobs` run as you, sandboxed (see
 [Security model](#security-model)); `webdata-notify` runs as root because it
-holds the webhooks' secrets, and `webdata-gate` as its own user because it
-holds the cookie-signing key. Apache runs as `www-data`
-and listens only on `127.0.0.1:LISTEN_PORT`; people reach it through
-`webdata-gate` (`127.0.0.1:GATE_PORT`), which tailscale serve points at.
+holds the webhooks' secrets, and `webdata-deploy` as its own user because it
+holds the Cloudflare token. Apache runs as `www-data` and listens only on
+`127.0.0.1:LISTEN_PORT`; people on your tailnet reach it through tailscale
+serve. Pages a person published are also on Cloudflare: a copy, which
+`webdata-deploy` keeps current.
 
 | Part | Where | What it does |
 |---|---|---|
@@ -56,7 +61,7 @@ and listens only on `127.0.0.1:LISTEN_PORT`; people reach it through
 | `webdata-bake` | `bin/webdata-bake`, started by `webdata-sync` | Bakes each report's first render: runs it in headless Chrome and saves the query results to `initial.json`. |
 | `webdata-jobs` | `bin/webdata-job daemon` | Cron scheduler for `jobs/*`: runs scripts, validates output, writes it into bot databases. |
 | Apache | `/etc/apache2/sites-available/webdata.conf` | Serves the shared site files from the program and `reports/`, `data/` from the content folder: static files only. |
-| `webdata-gate` | `bin/webdata-gate`, as `omb-webreports-gate` | The front door: password access per database, then passes requests to Apache unchanged. |
+| `webdata-deploy` | `bin/webdata-deploy daemon`, as `omb-webreports-deploy` | Publishes the pages a person chose (`sudo webdata-admin deploy add`) and their data to Cloudflare with wrangler, again whenever they change. |
 | `webdata-notify` | `bin/webdata-notify daemon`, as root | Keeps an OpenMausBot webhook for each bot that jobs name in `notify_failure`, and starts a task in that bot when a job keeps failing. |
 | kit | `/lib/kit.js`, `kit.css` (in the program) | Browser runtime every report uses: DuckDB-WASM, live updates, result cache, baked first render, charts, tables, design tokens. |
 | Reports | `/var/lib/omb-webreports/reports/<slug>/` | One directory each: `index.html`, `report.json`, `icon.svg`. One home-screen app each. |
@@ -207,11 +212,11 @@ described under "OpenMausBot isolation" below.
 
 ## Security model
 
-What's exposed is a read-only static site, on your tailnet or (with Funnel)
-the internet, behind `webdata-gate`. Assumptions: the machine runs only this
-site's Apache; whoever can reach the site may read every public database and
-the reports that read it; private ones need their password, which everyone
-who can use the bots is meant to know.
+What's exposed is a read-only static site on your tailnet, and, for the pages
+a person published, a static copy on Cloudflare. Assumptions: the machine runs
+only this site's Apache; whoever is on your tailnet may read every report and
+database; whoever has the link to a published page may read it and download
+its databases whole (or, with the site password, whoever knows the password).
 
 **Code is root's, content is yours.** Bots run as the owner, so anything the
 owner can write, a bot can change. Everything that runs as root, or that every
@@ -242,63 +247,58 @@ write: reports, jobs, and the published data and state the services generate.
 
 **Apache** (`admin/install.sh` writes it):
 - listens only on `127.0.0.1:LISTEN_PORT` and answers only this machine
-  (`Require local`): webdata-gate and the local tools; only `GET`/`HEAD`;
-- no directory listings for `reports/` and `data/` (they would name private
-  reports and databases); the shared files keep theirs;
+  (`Require local`): tailscale serve and the local tools; only `GET`/`HEAD`;
+- no directory listings for `reports/` and `data/` (they would show drafts and
+  stray files); the shared files keep theirs;
 - every served folder is untrusted content: no `.htaccess` (`AllowOverride None`), no
   symlinks, no CGI/SSI/handlers (`SetHandler None`), no content negotiation;
 - dotfiles and dot-directories are never served; `/` is denied by default;
 - version hidden, `TRACE` off, `nosniff`, `X-Frame-Options: SAMEORIGIN`,
   `Referrer-Policy: no-referrer`.
 
-**Password access (webdata-gate).** tailscale serve, and Funnel if the
-person opens the site to the internet, send every request to the gate. It
-works out which databases a request reveals: `DATA/<db>.*` and `DATA/<db>/…`
-reveal `<db>`; a report reveals the databases its `report.json` lists; the
-report index and data catalog are filtered per visitor; the shared files (`/`,
-`/lib`, the gallery) are public. Each database is public or private
-(`DATA_DIR/access/<db>.json`, set by `webdata-access`; none = `ACCESS_DEFAULT`
-from the root-owned config; a broken setting counts as private with no
-password, so it fails closed).
-- The password is stored as a scrypt hash. The right one sets a cookie for
-  that database (HttpOnly, SameSite=Lax, Secure on HTTPS, one year) signed
-  with a key only the gate's user can read, over the password's salt: a new
-  password invalidates every cookie for it. Bots can set passwords (anyone who
-  can use the bots is meant to know them) but can't forge cookies.
-- The path is decoded and normalized first; `.`/`..` segments, encoded slashes
-  and NULs are refused, and Apache is asked for exactly the normalized path,
-  so the gate and Apache can't disagree about which file a request means.
-- The password form is served at the private page's own address (iPhone
-  home-screen apps keep their own cookies and send other addresses to a
-  separate browser). It names neither the report nor the database.
-- Wrong passwords: 5 free tries, then one every 1, 2, 4… s (at most a minute)
-  per database, and one check at a time. tailscale serve and Funnel send
-  everyone from 127.0.0.1, so there's no per-visitor address to limit by;
-  that's why passwords need 12+ characters.
-- **The site's own Tailscale node** (optional, `webdata-admin site login`):
-  a second `tailscaled` (`webdata-tailscale.service`) in userspace mode, as
-  its own user (`omb-webreports-tailscale`), so the site has its own name and
-  Funnel never opens what else the machine serves. In userspace mode tailscaled
-  hands a tailnet peer's connection to any port it doesn't serve to
-  `127.0.0.1` on that port, which would let any tailnet device past the gate
-  to Apache (private databases) and to OpenMausBot as a local caller. So the
-  unit can't reach loopback at all (`IPAddressDeny=localhost`, enforced by the
-  kernel), serves only the gate's Unix socket
-  (`/run/omb-webreports-gate/gate.sock`, no more than its port), and gets the
-  real DNS servers instead of systemd-resolved's `127.0.0.53`. It has no
-  capabilities, a read-only system and no home directories.
-- The gate's unit: its own system user, read access only to `reports/` (it
-  opens each `report.json`) and `access/` (ACLs), localhost only, read-only system, no
-  capabilities. The tools on this machine (`webdata-check`, the bake) use
-  Apache directly and see everything, as bots could anyway.
-- What it isn't: per-person accounts or audit. Report and database names can
-  be probed (a missing report is a 404, a private one asks for a password);
-  their contents can't.
+**Pages on the internet (webdata-deploy).** Nothing on this machine is
+reachable from the internet: published pages are a copy on Cloudflare (a
+Worker with static assets), deployed with wrangler (pinned by
+`deploy/package-lock.json`, installed with `npm ci --ignore-scripts`, so no
+package's install script runs).
+- **Only a person publishes.** `sudo webdata-admin deploy add <slug>` records
+  the page and the databases its `report.json` lists then, in
+  `/etc/omb-webreports/deploy.json` (root-owned). Bots can change a published
+  page and its data, and those changes go out on their own, but can't add a
+  page or a database: a page that starts reading another database is held at
+  its last published version (kept in the service's state folder), because
+  its files can carry that database's rows (`initial.json`).
+- The service runs as its own user (`omb-webreports-deploy`) with read access
+  to `reports/` and `data/` only (ACLs), its token as a systemd credential
+  from the root-only `deploy-secrets.json`, a read-only system, no home
+  directories and no capabilities. Because it can read its token, it copies
+  the owner's files carefully: regular files only, opened without following
+  symlinks (no FIFOs or devices) and checked through `/proc/self/fd` to be
+  inside the folder they were listed from, so a bot can't plant a link that
+  publishes the token or anything else. Dotfiles are never copied; a file over
+  25 MB is skipped (Cloudflare's limit).
+- The copy holds the shared site files (not the design gallery), the published
+  pages, their databases (`DATA/<db>.*`, `DATA/<db>/…`), and the report index
+  and data catalog cut down to those, plus `nosniff`, `X-Frame-Options`,
+  `Referrer-Policy` and `X-Robots-Tag: noindex` headers. Each deploy replaces
+  the whole copy at once.
+- **The site password** (optional, one for the whole published site): then
+  the Worker (`deploy/worker.js`) runs before every request. The password is
+  the Worker's secret on Cloudflare (and root-only in `deploy-secrets.json`).
+  The right one sets a cookie `<expiry>.<HMAC-SHA256 of the expiry keyed by
+  the password>` for 400 days (HttpOnly, Secure, SameSite=Lax): nothing is
+  stored, and a new password signs everyone out. The form is served at the
+  page's own address (iPhone home-screen apps keep their own cookies) and
+  names nothing. Comparisons are constant-time; a wrong password waits a
+  second, and the minimum is 12 characters. Responses are `private, no-cache`.
+- What it isn't: per-person accounts or audit. The token can edit every Worker
+  in the Cloudflare account (that's how Cloudflare scopes them): use an
+  account for this, or accept that.
 
-**Filesystem.** Apache's user reads the program's site files (world-readable)
-and gets traverse-only (`x`) on the content folder plus read-only ACLs on its
-`reports/` and `data/` (also for new files). It can't read `jobs/`, `.state/`,
-your home or OpenMausBot's data.
+**Filesystem.** Apache's user, and webdata-deploy's, read the program's site
+files (world-readable) and get traverse-only (`x`) on the content folder plus
+read-only ACLs on its `reports/` and `data/` (also for new files). They can't
+read `jobs/`, `.state/`, your home or OpenMausBot's data.
 
 **Services** run as you, not root, with `NoNewPrivileges`,
 `ProtectSystem=strict`, `ProtectHome=read-only` and a private `/tmp`.
@@ -360,10 +360,10 @@ The only third-party code loaded at runtime is DuckDB-WASM from jsDelivr, at a
 pinned version. `webdata-browse` uses a fresh, empty Chrome profile per call,
 with Chrome's own sandbox on.
 
-**Not covered:** per-person accounts (a password is shared by everyone who
-knows it; to keep a bot's data off the site entirely, use `exclude_bots` in
-`sync.json`), audit logs of who viewed what, and multi-user isolation on the
-machine itself.
+**Not covered:** per-person accounts (the published site's password is shared
+by everyone who knows it; to keep a bot's data off the site entirely, use
+`exclude_bots` in `sync.json`), audit logs of who viewed what, and multi-user
+isolation on the machine itself.
 
 ## Files and state
 
@@ -377,8 +377,9 @@ machine itself.
 | `/var/lib/omb-webreports/reports/<slug>/` | your reports (and their generated icons, manifest, `initial.json`) | you |
 | `/var/lib/omb-webreports/data/` | published snapshots, catalog (generated) | you |
 | `/var/lib/omb-webreports/jobs/<name>/` | your data jobs | you |
-| `/var/lib/omb-webreports/access/<db>.json` | who may see each database (`webdata-access`; scrypt hashes) | you |
-| `/var/lib/omb-webreports-gate/key` | the key that signs visitors' cookies (0600) | `omb-webreports-gate` |
+| `/etc/omb-webreports/deploy.json` | pages on the internet: Cloudflare account, Worker name, password on/off, each published page and its approved databases | root |
+| `/etc/omb-webreports/deploy-secrets.json` | the Cloudflare API token and the site password (0600) | root |
+| `/var/lib/omb-webreports-deploy/` | `state.json` (the address, the last deploy; readable), the last deployed copy and the staging folder (0700) | `omb-webreports-deploy` |
 | `/var/lib/omb-webreports-notify/` | failure alerts: `status.json` (readable), `private/` webhook secrets and state (0700) | root |
 | `/var/lib/omb-webreports/.state/` | sync and bake state, the baker's Chrome profile, job status and logs | you |
 | `/var/cache/omb-webreports/` | which DuckDB engine each DuckDB-WASM build contains | root |

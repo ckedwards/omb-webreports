@@ -58,29 +58,24 @@ with `OMB_WEBREPORTS_CONFIG=/tmp/omb-test/etc/omb-webreports/config.env` plus
 (`openmausbot serve --port 18799 --data-dir /tmp/omb-test-omb`, then
 `OMB_URL=http://127.0.0.1:18799`), never your real bots.
 
-## Testing the gate and the alerts
+## Testing the root-side services
 
-Both are root-side services, so test them against throwaway copies, never the
+They're root-side services, so test them against throwaway copies, never the
 live ones:
 
-- **webdata-gate:** generate the Apache config with a `--destdir` install
-  (`LISTEN_PORT=18080 GATE_PORT=18081 DATA_DIR=/tmp/omb-test-data`), start a
-  throwaway Apache from it as yourself (`/usr/sbin/apache2 -f <conf> -k start`,
-  with a `PidFile`, `ErrorLog` and the modules the vhost needs), copy a few
-  reports and databases into the test `DATA_DIR`, and run
-  `OMB_WEBREPORTS_CONFIG=<the test config.env> WEBDATA_GATE_KEY=/tmp/gatekey bin/webdata-gate`.
-  `bin/webdata-access` with the same `OMB_WEBREPORTS_CONFIG` sets passwords
-  there. Test path tricks with `curl --path-as-is`: plain curl removes `./` and
-  `%2e%2e` itself, so the gate never sees them. The gate also listens on
-  `WEBDATA_GATE_SOCKET` when that file's directory exists (`curl --unix-socket`).
-- **The site's own node:** `webdata-admin site status` and `webdata-access
-  status` read a scratch `tailscaled --tun=userspace-networking --statedir=<dir>
-  --socket=<dir>/ts.sock --port=0` (as yourself, never logged in) through
-  `WEBDATA_SITE_TS_SOCKET=<dir>/ts.sock` (`bin/_admin-site.sh status`; `login`
-  and `funnel` need root: tailscaled lets only root serve a Unix socket). The loopback block
-  (`IPAddressDeny`) only holds in the system unit: a user unit ignores it. Check
-  it on the real node from another tailnet machine (or this one, through
-  Tailscale): `curl http://<node's 100.x address>:8080/` must fail.
+- **webdata-deploy:** `npm ci --ignore-scripts` in `deploy/` once (the
+  checkout's wrangler; `deploy/node_modules` is git-ignored). Point it at
+  scratch settings with `WEBDATA_DEPLOY_CONFIG=<dir>/deploy.json`,
+  `WEBDATA_DEPLOY_SECRETS=<dir>/secrets.json` and
+  `WEBDATA_DEPLOY_STATE=<dir>/state` (and `DATA_DIR` for scratch content).
+  `bin/webdata-deploy stage <new dir>` writes the copy it would publish and
+  prints its notes; `bin/webdata-deploy once --dry-run` also runs
+  `wrangler deploy --dry-run` (no account needed). To try the result, run
+  `wrangler dev --config <state>/stage/wrangler.json --port 18788` in the
+  staging folder (with a `.dev.vars` holding `SITE_PASSWORD=…` to try the
+  password Worker), and open it in `agent-browser`. `bin/_admin-deploy.mjs`
+  takes the same variables; as non-root it skips `systemctl`. Real deploys
+  only to a Worker name of your own, never the live one.
 - **webdata-notify:** a throwaway OpenMausBot (above) with a bot or two, scratch
   jobs, and `WEBDATA_JOBS_DIR`, `WEBDATA_JOBS_STATE`, `WEBDATA_NOTIFY_DIR`,
   `OMB_URL` and `WEBDATA_OMB_SESSION` (a file that doesn't exist) pointing at
@@ -95,3 +90,6 @@ listening process), never with a `pkill -f` pattern.
 Commit and push; production machines then run `sudo webdata-admin update` (or
 `--ref <tag>`). After editing `skills/`, run `bin/webdata-skills package` and
 commit the regenerated package with the skills.
+To move wrangler to a new version, change it in `deploy/package.json`, run
+`npm install --package-lock-only --ignore-scripts` in `deploy/`, test (above), and commit both
+files; installs then run `npm ci` once for the new lock file.

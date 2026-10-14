@@ -1,0 +1,276 @@
+#!/usr/bin/env node
+// webdata-deploy: publishes chosen pages to the internet, on Cloudflare
+// (webdata-deploy.service, as the omb-webreports-deploy user).
+//
+//   webdata-deploy status            the address, the published pages, the last deploy
+//   webdata-deploy stage <dir>       write the copy that would be deployed into <dir> (testing)
+//   webdata-deploy once [--dry-run]  stage and deploy now, then exit (testing; --dry-run: wrangler's)
+//   webdata-deploy daemon            the service: deploys whenever a published page or its data changes
+//
+// A person sets it up and chooses the pages with sudo webdata-admin deploy
+// (bin/_admin-deploy.mjs); bots can't. The site goes to Cloudflare as a Worker
+// with static assets, through wrangler (deploy/, pinned): a deploy replaces the
+// whole published copy at once, and only changed files are uploaded. With a
+// site password the Worker runs deploy/worker.js first, which asks for it.
+// What gets copied, and how safely, is in bin/_deploy.mjs.
+//
+// The service checks every few seconds whether anything it publishes changed;
+// it deploys once things have been quiet for QUIET_MS, at most once per
+// MIN_GAP_MS, and backs off after failures. state.json (readable by all) says
+// how the last one went; SIGHUP (webdata-admin deploy now) deploys right away.
+
+import { spawn } from 'node:child_process';
+import crypto from 'node:crypto';
+import fs from 'node:fs';
+import path from 'node:path';
+
+import { ROOT } from './_config.mjs';
+import { DEPLOY_CONFIG, DEPLOY_SECRETS, DEPLOY_STATE_DIR, DEPLOY_STATE, PUBLISHED_COPY, loadConfig, plan, fingerprint, stage, readJSON } from './_deploy.mjs';
+
+const WRANGLER = process.env.WEBDATA_WRANGLER || path.join(ROOT, 'deploy', 'node_modules', 'wrangler', 'bin', 'wrangler.js');
+const WORKER_JS = path.join(ROOT, 'deploy', 'worker.js');
+const LOGIN_HTML = path.join(ROOT, 'deploy', 'login.html');
+const COMPATIBILITY_DATE = '2026-10-01';
+const CHECK_MS = Number(process.env.WEBDATA_DEPLOY_CHECK_MS || 5_000);
+const QUIET_MS = Number(process.env.WEBDATA_DEPLOY_QUIET_MS || 20_000);
+const MIN_GAP_MS = Number(process.env.WEBDATA_DEPLOY_MIN_GAP_MS || 60_000);
+const MAX_BACKOFF_MS = 30 * 60_000;
+const DEPLOY_TIMEOUT_MS = 10 * 60_000;
+
+const log = (line) => console.log(line);
+const mb = (n) => `${(n / 1048576).toFixed(n < 1048576 ? 2 : 1)} MB`;
+const when = (iso) => (iso ? `${iso.slice(0, 16).replace('T', ' ')} UTC` : 'never');
+
+function writeJSON(file, value) {
+  const tmp = `${file}.tmp-${process.pid}`;
+  fs.writeFileSync(tmp, JSON.stringify(value, null, 2) + '\n', { mode: 0o644 });
+  fs.renameSync(tmp, file);
+}
+
+/** The token and site password: the service's systemd credential, else the file (testing). */
+function loadSecrets() {
+  const file = process.env.CREDENTIALS_DIRECTORY ? path.join(process.env.CREDENTIALS_DIRECTORY, 'deploy') : DEPLOY_SECRETS;
+  const s = readJSON(file, {}) || {};
+  return { token: typeof s.token === 'string' ? s.token : '', password: typeof s.password === 'string' ? s.password : '' };
+}
+
+/** wrangler's configuration for this deploy: static assets, plus the password Worker when there's a password. */
+function wranglerConfig(conf, withWorker) {
+  const assets = { directory: './site', html_handling: 'auto-trailing-slash', not_found_handling: 'none' };
+  const c = { name: conf.worker, account_id: conf.account_id, compatibility_date: COMPATIBILITY_DATE, workers_dev: true, preview_urls: false, assets };
+  if (withWorker) Object.assign(c, { main: './worker.js', no_bundle: true, assets: { ...assets, binding: 'ASSETS', run_worker_first: true } });
+  return c;
+}
+
+function run(args, env, cwd) {
+  return new Promise((resolve) => {
+    const child = spawn(process.execPath, [WRANGLER, ...args], { cwd, env, stdio: ['ignore', 'pipe', 'pipe'] });
+    let out = '';
+    child.stdout.on('data', (d) => { out += d; });
+    child.stderr.on('data', (d) => { out += d; });
+    const timer = setTimeout(() => child.kill('SIGTERM'), DEPLOY_TIMEOUT_MS);
+    child.on('close', (code) => { clearTimeout(timer); resolve({ code, out: out.replace(/\x1b\[[0-9;]*m/g, '') }); });
+    child.on('error', (e) => { clearTimeout(timer); resolve({ code: -1, out: String(e) }); });
+  });
+}
+
+/** wrangler writes a log file per run: keep the newest few. */
+function pruneLogs(dir) {
+  let files = [];
+  try { files = fs.readdirSync(dir).filter((f) => f.endsWith('.log')).sort(); } catch { return; }
+  for (const f of files.slice(0, -10)) fs.rmSync(path.join(dir, f), { force: true });
+}
+
+/** Stage everything and deploy it. Returns { ok, staged, url?, version?, error?, skipped? }. */
+async function deploy(conf, secrets, { dryRun = false, unless = null } = {}) {
+  const work = path.join(DEPLOY_STATE_DIR, 'stage');
+  fs.rmSync(work, { recursive: true, force: true });
+  fs.mkdirSync(work, { recursive: true, mode: 0o700 });
+  try {
+    const withWorker = conf.password;
+    const staged = stage(conf, path.join(work, 'site'));
+    const config = wranglerConfig(conf, withWorker);
+    let workerJs = '';
+    if (withWorker) {
+      workerJs = `const LOGIN_PAGE = ${JSON.stringify(fs.readFileSync(LOGIN_HTML, 'utf8'))};\n${fs.readFileSync(WORKER_JS, 'utf8')}`;
+      fs.writeFileSync(path.join(work, 'worker.js'), workerJs);
+    }
+    // The deployed result also depends on the Worker's code and settings (not the secrets: those stay on Cloudflare).
+    staged.hash = crypto.createHash('sha256').update(`${staged.hash}\0${JSON.stringify(config)}\0${workerJs}`).digest('hex');
+    if (unless && staged.hash === unless) return { ok: true, skipped: true, staged };
+    if (withWorker && !secrets.password) return { ok: false, staged, error: 'the site has a password turned on but none is set: sudo webdata-admin deploy password set' };
+    fs.writeFileSync(path.join(work, 'wrangler.json'), JSON.stringify(config, null, 2));
+    const args = ['deploy', '--config', path.join(work, 'wrangler.json'), '--autoconfig=false',
+      '--message', `omb-webreports: ${staged.pages.length} page(s)${staged.pages.length ? `: ${staged.pages.join(', ')}` : ''}`.slice(0, 100)];
+    if (withWorker) {
+      const sf = path.join(work, 'secrets.json');
+      fs.writeFileSync(sf, JSON.stringify({ SITE_PASSWORD: secrets.password }), { mode: 0o600 });
+      args.push('--secrets-file', sf);
+    }
+    if (dryRun) args.push('--dry-run');
+    const home = process.env.STATE_DIRECTORY || DEPLOY_STATE_DIR;
+    const env = {
+      PATH: process.env.PATH || '/usr/bin:/bin',
+      HOME: home,
+      XDG_CONFIG_HOME: path.join(home, '.config'),
+      WRANGLER_LOG_PATH: path.join(home, 'logs'),
+      WRANGLER_SEND_METRICS: 'false',
+      CI: 'true',
+      NO_COLOR: '1',
+      FORCE_COLOR: '0',
+      CLOUDFLARE_API_TOKEN: secrets.token,
+      CLOUDFLARE_ACCOUNT_ID: conf.account_id,
+    };
+    if (!fs.existsSync(WRANGLER)) return { ok: false, staged, error: `wrangler isn't installed (${WRANGLER}): sudo webdata-admin update` };
+    const { code, out } = await run(args, env, work);
+    if (code === 0 && !dryRun) {
+      // What's live now: held pages are served from this copy until approved.
+      fs.rmSync(PUBLISHED_COPY, { recursive: true, force: true });
+      fs.renameSync(path.join(work, 'site'), PUBLISHED_COPY);
+    }
+    pruneLogs(path.join(home, 'logs'));
+    if (code !== 0) {
+      // wrangler's first error and the line that says why.
+      const lines = out.split('\n').map((l) => l.trim()).filter((l) => l && !/^(⛅|─|🪵|If you think this is a bug)/u.test(l));
+      const i = lines.findIndex((l) => l.includes('[ERROR]'));
+      const err = (i >= 0 ? lines.slice(i, i + 2) : lines.slice(-3)).join(' ').replace(/^✘ \[ERROR\] /, '');
+      return { ok: false, staged, error: `wrangler exited ${code}: ${err}`.slice(0, 1000), output: out };
+    }
+    return {
+      ok: true,
+      staged,
+      url: /https:\/\/[a-z0-9.-]+\.workers\.dev/i.exec(out)?.[0] || null,
+      version: /Current Version ID:\s*([0-9a-f-]{36})/i.exec(out)?.[1] || null,
+      output: out,
+    };
+  } catch (e) {
+    return { ok: false, error: e.message };
+  } finally {
+    fs.rmSync(path.join(work, 'secrets.json'), { force: true });
+  }
+}
+
+// ---------------------------------------------------------------- the service
+
+async function daemon() {
+  fs.mkdirSync(DEPLOY_STATE_DIR, { recursive: true });
+  const state = readJSON(DEPLOY_STATE, {}) || {};
+  let force = false;
+  process.on('SIGHUP', () => { force = true; log('asked to deploy now'); });
+  let lastFp = null;
+  let changedAt = 0;
+  let dirty = true;
+  let lastTry = 0;
+  let failures = 0;
+  const save = () => writeJSON(DEPLOY_STATE, state);
+  log(`webdata-deploy: watching the published pages (${DEPLOY_CONFIG})`);
+
+  for (;;) {
+    const conf = loadConfig();
+    const secrets = loadSecrets();
+    const now = Date.now();
+    if (!conf.account_id || !conf.worker || !secrets.token) {
+      if (state.error !== 'not set up') { state.error = 'not set up'; save(); }
+      await new Promise((r) => setTimeout(r, CHECK_MS));
+      continue;
+    }
+    const fp = fingerprint(conf, `${conf.password}:${secrets.password.length}`);
+    if (fp !== lastFp) {
+      lastFp = fp;
+      changedAt = now;
+      dirty = true;
+      if (!state.pending_since) { state.pending_since = new Date(now).toISOString(); save(); }
+    }
+    const backoff = failures ? Math.min(MAX_BACKOFF_MS, 60_000 * 2 ** (failures - 1)) : 0;
+    const due = force || (dirty && now - changedAt >= QUIET_MS && now - lastTry >= Math.max(MIN_GAP_MS, backoff));
+    if (due) {
+      const forced = force;
+      force = false;
+      lastTry = now;
+      const r = await deploy(conf, secrets, { unless: forced ? null : state.hash });
+      state.last_attempt = new Date().toISOString();
+      if (r.staged) state.notes = r.staged.notes;
+      if (r.ok && r.skipped) {
+        dirty = false;
+        state.pending_since = null;
+        state.error = null;
+        failures = 0;
+      } else if (r.ok) {
+        dirty = false;
+        failures = 0;
+        Object.assign(state, {
+          url: r.url || state.url || null, version: r.version, hash: r.staged.hash, deployed_at: state.last_attempt,
+          files: r.staged.files, bytes: r.staged.bytes, pages: r.staged.pages, databases: r.staged.databases,
+          held: r.staged.held, password: conf.password, worker: conf.worker, pending_since: null, error: null, error_at: null,
+        });
+        log(`deployed ${r.staged.pages.length} page(s) (${r.staged.pages.join(', ') || 'none'}), ${r.staged.files} files, ${mb(r.staged.bytes)}${r.version ? `, version ${r.version}` : ''} → ${state.url || '?'}`);
+      } else {
+        failures += 1;
+        state.error = r.error;
+        state.error_at = state.last_attempt;
+        log(`deploy failed (${failures} in a row): ${r.error}`);
+        if (r.output) log(r.output.split('\n').slice(-30).join('\n'));
+      }
+      for (const n of state.notes || []) log(`note: ${n}`);
+      save();
+    }
+    await new Promise((r) => setTimeout(r, CHECK_MS));
+  }
+}
+
+// ---------------------------------------------------------------- status
+
+function status() {
+  const conf = loadConfig();
+  const state = readJSON(DEPLOY_STATE, {}) || {};
+  if (!conf.account_id || !conf.worker) {
+    console.log('not set up: no pages are published to the internet (sudo webdata-admin deploy setup)');
+    return;
+  }
+  const url = state.url || null;
+  console.log(`internet  ${url ? `${url}/` : `(Worker ${conf.worker}; address known after the first deploy)`}`);
+  console.log(`          ${conf.password ? 'password: on (one for the whole site)' : 'no password: anyone with the link'}; Cloudflare account ${conf.account_id.slice(0, 8)}…, Worker ${conf.worker}`);
+  const slugs = Object.keys(conf.pages).sort();
+  console.log(`pages     ${slugs.length ? '' : 'none yet (sudo webdata-admin deploy add <slug>)'}`);
+  for (const slug of slugs) {
+    const p = conf.pages[slug];
+    console.log(`  ${slug.padEnd(22)} ${url ? `${url}/reports/${slug}/` : ''}   data: ${p.databases.join(', ') || 'none'}`);
+  }
+  // The service's own notes (it can see the last published copy); else work them out here.
+  let notes = state.notes;
+  if (!notes) { try { notes = plan(conf).notes; } catch { notes = []; } }
+  for (const n of notes) console.log(`  note: ${n}`);
+  if (state.deployed_at) {
+    console.log(`last      ${when(state.deployed_at)}: ${state.files} files, ${mb(state.bytes || 0)}${state.version ? `, version ${state.version.slice(0, 8)}` : ''}`);
+  } else {
+    console.log('last      no deploy yet');
+  }
+  if (state.pending_since && !state.error) console.log(`pending   changes since ${when(state.pending_since)}: they go out within a minute or two`);
+  if (state.error) console.log(`ERROR     ${state.error}${state.error_at ? ` (${when(state.error_at)}; it retries, backing off)` : ''}\n          journalctl -u webdata-deploy -n 50`);
+}
+
+// ---------------------------------------------------------------- main
+
+const [cmd, ...rest] = process.argv.slice(2);
+if (cmd === 'daemon') {
+  await daemon();
+} else if (cmd === 'status' || !cmd) {
+  status();
+} else if (cmd === 'stage') {
+  const dir = rest[0];
+  if (!dir) { console.error('usage: webdata-deploy stage <dir>'); process.exit(2); }
+  if (fs.existsSync(dir)) { console.error(`${dir} exists; give a new folder`); process.exit(2); }
+  const s = stage(loadConfig(), path.resolve(dir));
+  console.log(`staged ${s.files} files, ${mb(s.bytes)} in ${dir}: pages ${s.pages.join(', ') || 'none'}; data ${s.databases.join(', ') || 'none'}`);
+  for (const n of s.notes) console.log(`note: ${n}`);
+} else if (cmd === 'once') {
+  const conf = loadConfig();
+  const r = await deploy(conf, loadSecrets(), { dryRun: rest.includes('--dry-run') });
+  if (r.output) process.stdout.write(r.output);
+  for (const n of r.staged?.notes || []) console.log(`note: ${n}`);
+  if (!r.ok) { console.error(`error: ${r.error}`); process.exit(1); }
+  console.log(r.staged ? `ok: ${r.staged.files} files, ${mb(r.staged.bytes)}${r.url ? ` → ${r.url}` : ''}` : 'ok');
+} else {
+  console.error('usage: webdata-deploy status | stage <dir> | once [--dry-run] | daemon');
+  process.exit(2);
+}

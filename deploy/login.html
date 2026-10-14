@@ -6,8 +6,9 @@
 <meta name="robots" content="noindex">
 <meta name="color-scheme" content="light dark">
 <title>Private</title>
-<!-- Served by webdata-gate in place of a private page, at that page's own
-     address. Self-contained on purpose: nothing else is reachable yet. -->
+<!-- Served by the published site's Worker (deploy/worker.js) when the site
+     has a password, in place of any page, at that page's own address.
+     Self-contained on purpose: nothing else is reachable yet. -->
 <style>
   :root { --bg: #f6f7f9; --card: #ffffff; --ink: #14171c; --muted: #5d6673; --line: #d9dee5; --accent: #1f6feb; --danger: #c62828; }
   @media (prefers-color-scheme: dark) {
@@ -38,9 +39,8 @@
       <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="4" y="11" width="16" height="10" rx="2"/><path d="M8 11V7a4 4 0 0 1 8 0v4"/></svg>
     </div>
     <h1>This page is private</h1>
-    <p>{{STEP}}Enter the password to see it on this device.</p>
+    <p>Enter the password to see it on this device.</p>
     <form method="post" action="{{ACTION}}" autocomplete="on">
-      <input type="hidden" name="step" value="{{STEP_INDEX}}">
       <input type="text" name="username" value="omb-webreports" autocomplete="username" hidden>
       <label for="password">Password</label>
       <input id="password" name="password" type="password" autocomplete="current-password" required autofocus>

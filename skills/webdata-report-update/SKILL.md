@@ -70,31 +70,22 @@ It must print `OK` with no new problems. Open both screenshots (`light.png`,
 broke (labels overlapping, clipped text, empty cards). Run the DESIGN.md §10
 checklist for anything you added.
 
-## Who can see it (passwords)
+## Published pages
 
-`webdata-access status` shows who can reach the site (your tailnet only, or
-the whole internet through Tailscale Funnel) and each database's and report's
-access. Access belongs to a **database**: making `cary-news` private makes its
-file, its other files and every report that reads it (its `report.json`
-`databases`) private. So `databases` must list every database the page reads.
+`webdata-deploy status` lists the pages a person put on the internet. If this
+page is one of them:
 
-```bash
-webdata-access set <database> <<'EOF'      # private with a new password (or change it)
-<the password the person gave, 12+ characters>
-EOF
-webdata-access public <database>            # anyone who can reach the site
-webdata-access private <database>           # password required; keeps the current one
-webdata-access default <database>           # back to the site default
-```
+- Your changes go public within a minute or two, data included: keep private
+  notes, names and data out of it.
+- Adding a database to `databases` holds the page: the internet keeps its last
+  published version until the person approves with `sudo webdata-admin deploy
+  add <slug>`. Tell them when you add one, and what the new database holds
+  (anyone with the link can download it whole).
+- After a rename the old name stays published: the person runs `sudo
+  webdata-admin deploy remove <old>` and `add <new>`.
 
-- Only on the person's request, with the password they give you. Never invent
-  one, never repeat it back, never write it into a file, note or memory.
-- Changing the password signs **every device** out of that database: tell
-  the person they'll enter the new one once on each device (and inside each
-  home-screen app).
-- It covers every report that reads the database: `webdata-access status`
-  lists them; name them when you confirm.
-- A forgotten password can't be recovered (only a hash is kept): set a new one.
+Publishing, unpublishing and the site's password are the person's (sudo); you
+never have the password.
 
 ## Rename, hide, delete
 

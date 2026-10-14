@@ -11,9 +11,9 @@
 #                                                  a pairing code for a new device (full access unless --chat-only)
 #   sudo webdata-admin skills status|add <bot>...|sync [--dry-run]|login [--code C]|logout
 #                                                  the bots' omb-webreports skills (webdata-skills)
-#   sudo webdata-admin site status|login [<name>]|funnel on|off|logout
-#                                                  the site's address: its own Tailscale node,
-#                                                  https://<name>.<tailnet>.ts.net/, and Funnel (the internet)
+#   sudo webdata-admin deploy setup|add <slug>...|remove <slug>...|password set|off|status|now|disable
+#                                                  publish pages to the internet, on Cloudflare
+#                                                  (webdata-deploy keeps them up to date)
 #
 # update and upgrade-openmausbot run the scripts in the root-owned clone the
 # install came from (/etc/omb-webreports/installed.json; normally
@@ -82,8 +82,8 @@ case $cmd in
   pair)
     exec "$NODE" "$BIN/_admin-pair.mjs" "$@"
     ;;
-  site)
-    exec bash "$BIN/_admin-site.sh" "$@"
+  deploy)
+    exec "$NODE" "$BIN/_admin-deploy.mjs" "$@"
     ;;
   skills)
     [[ ${1:-} == package ]] && die "package is a development command: bin/webdata-skills package in your checkout"
@@ -118,8 +118,8 @@ case $cmd in
     echo
     "$NODE" "$BIN/webdata-notify" status 2>&1 | sed 's/^/  /' || true
     echo
-    echo "address"
-    bash "$BIN/_admin-site.sh" status 2>&1 | sed 's/^/  /' || true
+    echo "published to the internet (webdata-admin deploy)"
+    "$NODE" "$BIN/_admin-deploy.mjs" status 2>&1 | sed 's/^/  /' || true
     ;;
   *)
     echo "unknown command: $cmd" >&2

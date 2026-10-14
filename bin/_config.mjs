@@ -10,9 +10,10 @@
 //   DATA_DIR      your content: reports, published data, jobs, state (owned by
 //                 WEBREPORTS_OWNER, the user OpenMausBot and its bots run as)
 //
-// Requests from people reach webdata-gate (GATE_PORT), which applies password
-// access and passes allowed ones to Apache; Apache itself listens only on
-// 127.0.0.1 (LOCAL_URL, which the tools on this machine use directly).
+// Apache listens only on 127.0.0.1 (LOCAL_URL, which the tools on this machine
+// use directly); people on the tailnet reach it through tailscale serve
+// (SITE_URL). Pages published to the internet are copies on Cloudflare
+// (bin/webdata-deploy).
 //
 // Run directly (node _config.mjs) it prints the paths as KEY=value lines for
 // the shell tools.
@@ -52,23 +53,11 @@ export const SYNC_JSON = path.join(DATA_DIR, 'sync.json');
 const port = pick('LISTEN_PORT', '8080');
 /** Apache: this machine only (admin/install.sh binds it to 127.0.0.1). */
 export const LISTEN_IP = pick('LISTEN_IP', '127.0.0.1');
-export const GATE_PORT = pick('GATE_PORT', '8081');
-/** webdata-gate, where tailscale serve (and Funnel) send people. */
-export const GATE_URL = `http://127.0.0.1:${GATE_PORT}`;
-/** The gate also listens here (its systemd RuntimeDirectory), for the site's own Tailscale node. */
-export const GATE_SOCKET = process.env.WEBDATA_GATE_SOCKET || '/run/omb-webreports-gate/gate.sock';
-/** The site's own Tailscale node (webdata-tailscale.service; `sudo webdata-admin site`), if it
- *  has one: https://<SITE_HOSTNAME>.<tailnet>.ts.net/. It can't reach this machine's loopback,
- *  so it serves the gate through GATE_SOCKET. Empty: the site has no node of its own. */
-export const SITE_HOSTNAME = pick('SITE_HOSTNAME', '');
-export const SITE_TS_SOCKET = process.env.WEBDATA_SITE_TS_SOCKET || '/run/omb-webreports-tailscale/tailscaled.sock';
-export const SITE_URL = pick('SITE_URL', GATE_URL).replace(/\/$/, '');
-/** Apache directly, past the gate: for tools on this machine (they see private reports too). */
+/** Apache directly: for tools on this machine. */
 export const LOCAL_URL = `http://${LISTEN_IP.includes(':') ? `[${LISTEN_IP}]` : LISTEN_IP}:${port}`;
-/** Databases (and the reports that read them) with no access setting: public or private. */
-export const ACCESS_DEFAULT = pick('ACCESS_DEFAULT', 'public') === 'private' ? 'private' : 'public';
-/** Bots' access settings, one <database>.json each (webdata-access); read by webdata-gate. */
-export const ACCESS_DIR = path.join(DATA_DIR, 'access');
+/** The address people on the tailnet open: tailscale serve in front of Apache
+ *  (https://<machine>.<tailnet>.ts.net:8443). */
+export const SITE_URL = pick('SITE_URL', LOCAL_URL).replace(/\/$/, '');
 export const OMB_DATA_DIR = pick('OMB_DATA_DIR', path.join(os.homedir(), '.openmausbot'));
 export const NODE_MODULES_DIR = pick('NODE_MODULES_DIR', '/usr/lib/node_modules');
 /** The DuckDB-WASM build reports load in the browser. It must contain the same

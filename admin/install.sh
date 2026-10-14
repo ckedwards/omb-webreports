@@ -23,10 +23,12 @@
 #                                      which source and commit is installed
 #   DATA_DIR (/var/lib/omb-webreports) your reports, published data, jobs and state,
 #                                      owned by WEBREPORTS_OWNER (who runs OpenMausBot)
-#   Apache (dedicated to this site, on 127.0.0.1 only), webdata-gate (the front
-#   door tailscale serve/Funnel send people to: password access), webdata-sync,
-#   webdata-jobs, webdata-notify (failure alerts, root), the OpenMausBot isolation
-#   drop-in and session timer, and the webdata-* tools in /usr/local/bin.
+#   Apache (dedicated to this site, on 127.0.0.1 only; tailscale serve gives
+#   your tailnet HTTPS to it), webdata-sync, webdata-jobs, webdata-notify
+#   (failure alerts, root), webdata-deploy (publishes chosen pages to Cloudflare,
+#   once set up with webdata-admin deploy; wrangler, pinned, comes with the
+#   program), the OpenMausBot isolation drop-in and session timer, and the
+#   webdata-* tools in /usr/local/bin.
 set -euo pipefail
 
 SRC=$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/.." && pwd)
@@ -53,11 +55,10 @@ PREFIX=/usr/local/lib/omb-webreports
 CONF_DIR=/etc/omb-webreports
 CONFIG=$CONF_DIR/config.env
 LOOPBACK_DROPIN=/etc/systemd/system/openmausbot.service.d/omb-webreports-loopback.conf
-TOOLS=(webdata-info webdata-ls webdata-sql webdata-check webdata-new-report webdata-job webdata-browse webdata-errors webdata-sync webdata-bake webdata-skills webdata-notify webdata-admin webdata-access)
-GATE_USER=omb-webreports-gate
-# The site's own Tailscale node: its user, and the LocalAPI socket (as bin/_config.mjs SITE_TS_SOCKET).
-TS_USER=omb-webreports-tailscale
-TS_SOCKET=/run/$TS_USER/tailscaled.sock
+TOOLS=(webdata-info webdata-ls webdata-sql webdata-check webdata-new-report webdata-job webdata-browse webdata-errors webdata-sync webdata-bake webdata-skills webdata-notify webdata-deploy webdata-admin)
+# webdata-deploy's user: reads the reports and data (to publish the chosen pages) and its token.
+DEPLOY_USER=omb-webreports-deploy
+DEPLOY_SECRETS=$CONF_DIR/deploy-secrets.json
 NODE=$(command -v node || true)
 [[ -n $NODE ]] || die "node not found (Node.js 20+ is required; see docs/setup.md)"
 asowner() { if (( TEST )); then "$@"; else runuser -u "$WEBREPORTS_OWNER" -- "$@"; fi; }
@@ -80,6 +81,13 @@ ask() {
   printf -v "$k" '%s' "${a:-$def}"
 }
 
+# This machine's own HTTPS name from Tailscale (https://<machine>.<tailnet>.ts.net), if any.
+machine_https() {
+  local dns
+  dns=$(tailscale status --json 2>/dev/null | "$NODE" -e 'try { const s = JSON.parse(require("fs").readFileSync(0, "utf8")); console.log((s.Self?.DNSName || "").replace(/\.$/, "")); } catch {}' || true)
+  [[ -n $dns ]] && echo "https://$dns"
+}
+
 first_run_config() {
   echo "First install: a few settings for $D$CONFIG (change them there later, then re-run this)."
   local owner_def=${SUDO_USER:-}; [[ $owner_def == root ]] && owner_def=""
@@ -89,16 +97,12 @@ first_run_config() {
   local home; home=$(getent passwd "$WEBREPORTS_OWNER" | cut -d: -f6)
   ask DATA_DIR "Where your reports, published data and jobs live" /var/lib/omb-webreports
   LISTEN_IP=127.0.0.1
-  ask LISTEN_PORT "Port for Apache (on 127.0.0.1; people reach it through webdata-gate)" 8080
+  ask LISTEN_PORT "Port for Apache (on 127.0.0.1; tailscale serve sends people to it)" 8080
   [[ $LISTEN_PORT =~ ^[0-9]+$ ]] || die "LISTEN_PORT must be a number"
-  ask GATE_PORT "Port for webdata-gate, the front door tailscale serve sends people to" 8081
-  [[ $GATE_PORT =~ ^[0-9]+$ && $GATE_PORT != "$LISTEN_PORT" ]] || die "GATE_PORT must be a number other than LISTEN_PORT"
-  ask ACCESS_DEFAULT "Databases and reports without a password setting are (public / private)" public
-  [[ $ACCESS_DEFAULT =~ ^(public|private)$ ]] || die "ACCESS_DEFAULT must be public or private"
-  local site_def="http://127.0.0.1:$GATE_PORT" https
-  https=$(tailscale serve status 2>/dev/null | awk '/^https:\/\//{print $1; exit}' || true)
-  [[ -n $https ]] && site_def=${https%/}:8443
-  ask SITE_URL "The address people open (the HTTPS one tailscale serve gives the gate)" "$site_def"
+  local site_def="http://127.0.0.1:$LISTEN_PORT" https
+  https=$(machine_https)
+  [[ -n $https ]] && site_def=$https:8443
+  ask SITE_URL "The address people open (the HTTPS one tailscale serve gives Apache)" "$site_def"
   ask OMB_DATA_DIR "OpenMausBot's data folder" "$home/.openmausbot"
   ask NODE_MODULES_DIR "Global node_modules with OpenMausBot's native modules" /usr/lib/node_modules
   ask OMB_LOOPBACK_TRUST "Isolate OpenMausBot from local programs, bots included (service / owner / empty)" service
@@ -125,8 +129,6 @@ DATA_DIR=$DATA_DIR
 PLATFORM_DIR=$PREFIX/webroot
 LISTEN_IP=127.0.0.1
 LISTEN_PORT=$LISTEN_PORT
-GATE_PORT=$GATE_PORT
-ACCESS_DEFAULT=$ACCESS_DEFAULT
 SITE_URL=$SITE_URL
 OMB_DATA_DIR=$OMB_DATA_DIR
 NODE_MODULES_DIR=$NODE_MODULES_DIR
@@ -152,27 +154,35 @@ source "$D$CONFIG"
 grep -q '^PLATFORM_DIR=' "$D$CONFIG" || echo "PLATFORM_DIR=$PREFIX/webroot" >> "$D$CONFIG"
 : "${WEBREPORTS_OWNER:?} ${DATA_DIR:?}"
 LISTEN_PORT=${LISTEN_PORT:-8080}
-# Older installs had Apache on the tailnet address: it moves behind webdata-gate.
+# Older installs had Apache on the tailnet address: it moves to 127.0.0.1.
 OLD_LISTEN_IP=${LISTEN_IP:-}
 if [[ ${LISTEN_IP:-} != 127.0.0.1 ]]; then
   if grep -q '^LISTEN_IP=' "$D$CONFIG"; then sed -i 's/^LISTEN_IP=.*/LISTEN_IP=127.0.0.1/' "$D$CONFIG"; else echo "LISTEN_IP=127.0.0.1" >> "$D$CONFIG"; fi
-  [[ -n $OLD_LISTEN_IP ]] && echo "Apache moves from $OLD_LISTEN_IP:$LISTEN_PORT to 127.0.0.1:$LISTEN_PORT, behind webdata-gate (LISTEN_IP in $CONFIG)."
+  [[ -n $OLD_LISTEN_IP ]] && echo "Apache moves from $OLD_LISTEN_IP:$LISTEN_PORT to 127.0.0.1:$LISTEN_PORT (LISTEN_IP in $CONFIG)."
 fi
 LISTEN_IP=127.0.0.1
-grep -q '^GATE_PORT=' "$D$CONFIG" || echo "GATE_PORT=8081" >> "$D$CONFIG"
-grep -q '^ACCESS_DEFAULT=' "$D$CONFIG" || echo "ACCESS_DEFAULT=public" >> "$D$CONFIG"
-GATE_PORT=${GATE_PORT:-8081}
-ACCESS_DEFAULT=${ACCESS_DEFAULT:-public}
-[[ $ACCESS_DEFAULT =~ ^(public|private)$ ]] || die "ACCESS_DEFAULT in $CONFIG must be public or private"
-[[ $GATE_PORT =~ ^[0-9]+$ && $GATE_PORT != "$LISTEN_PORT" ]] || die "GATE_PORT in $CONFIG must be a number other than LISTEN_PORT"
-SITE_URL=${SITE_URL:-http://127.0.0.1:$GATE_PORT}
+# Older installs had password access (webdata-gate, GATE_PORT, ACCESS_DEFAULT) and
+# maybe the site's own Tailscale node (SITE_HOSTNAME, whose address SITE_URL then
+# was): tailscale serve now goes straight to Apache, on the machine's address.
+OLD_GATE_PORT=${GATE_PORT:-8081}
+OLD_SITE_HOSTNAME=${SITE_HOSTNAME:-}
+set_conf() { if grep -q "^$1=" "$D$CONFIG"; then sed -i "s|^$1=.*|$1=$2|" "$D$CONFIG"; else echo "$1=$2" >> "$D$CONFIG"; fi; }
+if (( ! PRINT )); then
+  if [[ -n $OLD_SITE_HOSTNAME || ${SITE_URL:-} == "http://127.0.0.1:$OLD_GATE_PORT" ]]; then
+    https=$(machine_https)
+    new_url=http://127.0.0.1:$LISTEN_PORT; [[ -n $https ]] && new_url=$https:8443
+    [[ ${SITE_URL:-} == "$new_url" ]] || echo "SITE_URL changes from ${SITE_URL:-(none)} to $new_url (in $CONFIG)."
+    set_conf SITE_URL "$new_url"
+    SITE_URL=$new_url
+  fi
+  sed -i -E '/^(GATE_PORT|ACCESS_DEFAULT|SITE_HOSTNAME)=/d' "$D$CONFIG"
+fi
+SITE_URL=${SITE_URL:-http://127.0.0.1:$LISTEN_PORT}
 HOME_DIR=$(getent passwd "$WEBREPORTS_OWNER" | cut -d: -f6)
 OMB_DATA_DIR=${OMB_DATA_DIR:-$HOME_DIR/.openmausbot}
 NODE_MODULES_DIR=${NODE_MODULES_DIR:-/usr/lib/node_modules}
 OMB_URL=${OMB_URL:-http://127.0.0.1:8799}
 OMB_LOOPBACK_TRUST=${OMB_LOOPBACK_TRUST:-}
-SITE_HOSTNAME=${SITE_HOSTNAME:-}
-[[ -z $SITE_HOSTNAME || $SITE_HOSTNAME =~ ^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$ ]] || die "SITE_HOSTNAME in $CONFIG must be a hostname: lowercase letters, digits and -"
 [[ $OMB_LOOPBACK_TRUST =~ ^(|owner|service)$ ]] || die "OMB_LOOPBACK_TRUST in $CONFIG must be service, owner or empty"
 OWNER=$WEBREPORTS_OWNER
 
@@ -202,7 +212,7 @@ served_dir() {
     <Directory $1>
         # No .htaccess, no symlinks, no CGI/SSI, no content negotiation, no
         # handlers. Listings only for the shared files: elsewhere a listing
-        # would name private reports and databases.
+        # would show drafts and stray files.
         Options ${2:-None}
         AllowOverride None
         AllowOverrideList None
@@ -257,8 +267,8 @@ $(served_dir "$PREFIX/webroot" Indexes)
 $(served_dir "$DATA_DIR/reports")
 $(served_dir "$DATA_DIR/data")
 
-    # Read-only, and only from this machine: people come through webdata-gate
-    # (password access), the tools on this machine directly.
+    # Read-only, and only from this machine: people come through tailscale
+    # serve (which connects from here), the tools on this machine directly.
     <Location "/">
         <RequireAll>
             Require method GET HEAD
@@ -293,122 +303,6 @@ $(served_dir "$DATA_DIR/data")
     ErrorLog \${APACHE_LOG_DIR}/webdata-error.log
     CustomLog \${APACHE_LOG_DIR}/webdata-access.log combined
 </VirtualHost>
-EOF
-
-# The front door. Its own system user: the key that signs visitors' cookies is
-# in its StateDirectory, which neither the owner (and so bots) nor Apache can
-# read. It may read only reports/ (it opens each report.json) and the access
-# settings (ACLs below), and talk only to Apache on this machine.
-put /etc/systemd/system/webdata-gate.service <<EOF
-# Written by omb-webreports admin/install.sh.
-[Unit]
-Description=omb-webreports gate: password access in front of Apache
-After=network.target apache2.service
-
-[Service]
-Type=simple
-User=$GATE_USER
-Group=$GATE_USER
-ExecStart=$NODE $PREFIX/bin/webdata-gate
-Restart=always
-RestartSec=2
-StateDirectory=omb-webreports-gate
-StateDirectoryMode=0700
-# gate.sock: the same door as 127.0.0.1:$GATE_PORT, for the site's own Tailscale node.
-RuntimeDirectory=omb-webreports-gate
-RuntimeDirectoryMode=0755
-UMask=0077
-NoNewPrivileges=yes
-CapabilityBoundingSet=
-AmbientCapabilities=
-PrivateTmp=yes
-PrivateDevices=yes
-ProtectSystem=strict
-ProtectHome=yes
-ProtectKernelTunables=yes
-ProtectKernelModules=yes
-ProtectKernelLogs=yes
-ProtectControlGroups=yes
-ProtectClock=yes
-ProtectHostname=yes
-ProtectProc=invisible
-RestrictNamespaces=yes
-RestrictRealtime=yes
-RestrictSUIDSGID=yes
-LockPersonality=yes
-RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
-IPAddressDeny=any
-IPAddressAllow=localhost
-SystemCallArchitectures=native
-SystemCallFilter=@system-service
-SystemCallErrorNumber=EPERM
-
-[Install]
-WantedBy=multi-user.target
-EOF
-
-# The site's own Tailscale node (SITE_HOSTNAME; `webdata-admin site login` starts
-# it): a second tailscaled in userspace mode, as its own user, so the site gets
-# https://<SITE_HOSTNAME>.<tailnet>.ts.net/ and Funnel opens only the site.
-# In userspace mode tailscaled hands a tailnet peer's connection to any port it
-# doesn't serve to 127.0.0.1 on that port, which would let peers past the gate
-# to Apache (private databases) and to OpenMausBot as a local caller. So it may
-# not reach loopback at all (IPAddressDeny), and serves the gate's Unix socket.
-# That also shuts out systemd-resolved's 127.0.0.53, so it gets the real servers.
-TAILSCALED=$(command -v tailscaled || echo /usr/sbin/tailscaled)
-resolv=""
-if grep -Eq '^nameserver[[:space:]]+(127\.|::1)' /etc/resolv.conf 2>/dev/null && [[ -f /run/systemd/resolve/resolv.conf ]]; then
-  resolv="BindReadOnlyPaths=/run/systemd/resolve/resolv.conf:/etc/resolv.conf"
-fi
-put /etc/systemd/system/webdata-tailscale.service <<EOF
-# Written by omb-webreports admin/install.sh. Started by: sudo webdata-admin site login <name>
-[Unit]
-Description=omb-webreports: the site's own Tailscale node (SITE_HOSTNAME in $CONFIG)
-Wants=network-online.target
-After=network-online.target systemd-resolved.service webdata-gate.service
-
-[Service]
-Type=notify
-User=$TS_USER
-Group=$TS_USER
-ExecStart=$TAILSCALED --tun=userspace-networking --statedir=/var/lib/$TS_USER --socket=$TS_SOCKET --port=0
-Restart=on-failure
-RestartSec=5
-StateDirectory=$TS_USER
-StateDirectoryMode=0700
-RuntimeDirectory=$TS_USER
-RuntimeDirectoryMode=0755
-UMask=0077
-# In userspace mode tailscaled passes a tailnet peer's connection to a port it
-# doesn't serve on to 127.0.0.1 on that port: past the gate. So no loopback at
-# all; it reaches the gate by the gate's socket.
-IPAddressDeny=localhost
-$resolv
-NoNewPrivileges=yes
-CapabilityBoundingSet=
-AmbientCapabilities=
-PrivateTmp=yes
-PrivateDevices=yes
-ProtectSystem=strict
-ProtectHome=yes
-ProtectKernelTunables=yes
-ProtectKernelModules=yes
-ProtectKernelLogs=yes
-ProtectControlGroups=yes
-ProtectClock=yes
-ProtectHostname=yes
-ProtectProc=invisible
-RestrictNamespaces=yes
-RestrictRealtime=yes
-RestrictSUIDSGID=yes
-LockPersonality=yes
-RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX AF_NETLINK
-SystemCallArchitectures=native
-SystemCallFilter=@system-service
-SystemCallErrorNumber=EPERM
-
-[Install]
-WantedBy=multi-user.target
 EOF
 
 # Both services run the root-owned program as the owner, and may write only DATA_DIR
@@ -514,6 +408,61 @@ SystemCallErrorNumber=EPERM
 WantedBy=multi-user.target
 EOF
 
+# Publishing chosen pages to Cloudflare (bin/webdata-deploy; set up by `sudo
+# webdata-admin deploy setup`, which writes the secrets file it waits for). Its
+# own user, which may read only reports/ and data/ (ACLs below) and its API
+# token (a systemd credential from the root-only secrets file), and write only
+# its StateDirectory. It needs the internet (Cloudflare's API), nothing on this
+# machine.
+deploy_home=yes; [[ $DATA_DIR == /home/* || $DATA_DIR == /root/* ]] && deploy_home=read-only
+put /etc/systemd/system/webdata-deploy.service <<EOF
+# Written by omb-webreports admin/install.sh.
+[Unit]
+Description=omb-webreports deploy: publishes chosen pages to Cloudflare
+Wants=network-online.target
+After=network-online.target webdata-sync.service
+ConditionPathExists=$DEPLOY_SECRETS
+
+[Service]
+Type=simple
+User=$DEPLOY_USER
+Group=$DEPLOY_USER
+ExecStart=$NODE $PREFIX/bin/webdata-deploy daemon
+Restart=always
+RestartSec=10
+Nice=10
+LoadCredential=deploy:$DEPLOY_SECRETS
+StateDirectory=omb-webreports-deploy
+StateDirectoryMode=0755
+Environment=HOME=/var/lib/omb-webreports-deploy
+UMask=0022
+NoNewPrivileges=yes
+CapabilityBoundingSet=
+AmbientCapabilities=
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectSystem=strict
+ProtectHome=$deploy_home
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+ProtectHostname=yes
+ProtectProc=invisible
+RestrictNamespaces=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX AF_NETLINK
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
+SystemCallErrorNumber=EPERM
+
+[Install]
+WantedBy=multi-user.target
+EOF
+
 # OpenMausBot isolation (OMB_LOOPBACK_TRUST). With "service", OpenMausBot ignores
 # requests from this machine that have no login, so bots' shells can't
 # administer it. webdata-skills signs in with its own session (root-only, in
@@ -565,16 +514,15 @@ fi
 
 # --- packages --------------------------------------------------------------------
 (( TEST )) || apt-get install -y -qq apache2 acl >/dev/null
-for u in "$GATE_USER" "$TS_USER"; do
-  if (( ! TEST )) && ! id "$u" >/dev/null 2>&1; then
-    useradd --system --no-create-home --home-dir /nonexistent --shell /usr/sbin/nologin "$u"
-  fi
-done
+if (( ! TEST )) && ! id "$DEPLOY_USER" >/dev/null 2>&1; then
+  useradd --system --no-create-home --home-dir /nonexistent --shell /usr/sbin/nologin "$DEPLOY_USER"
+fi
 
 # --- the program: a root-owned copy of just what runs and what agents read --------
 PROGRAM_DIRS=(bin skills templates examples docs webroot/lib webroot/reports/_gallery)
 PROGRAM_FILES=(README.md LICENSE THIRD_PARTY.md READ_FIRST.md DESIGN.md CLAUDE.md AGENTS.md config.example.env
-  webroot/index.html webroot/report.json webroot/icon.svg)
+  webroot/index.html webroot/report.json webroot/icon.svg
+  deploy/package.json deploy/package-lock.json deploy/worker.js deploy/login.html)
 new=$D$PREFIX.new
 rm -rf "$new"
 for p in "${PROGRAM_DIRS[@]}" "${PROGRAM_FILES[@]}"; do
@@ -586,6 +534,18 @@ for p in "${PROGRAM_DIRS[@]}" "${PROGRAM_FILES[@]}"; do
   mkdir -p "$new/$(dirname "$p")"
   cp -R -P --no-preserve=ownership "$SRC/$p" "$new/$p"
 done
+# wrangler (Cloudflare's CLI) for webdata-deploy, exactly as deploy/package-lock.json
+# pins it. Kept from the last install while the lock file is the same. Packages'
+# install scripts never run (--ignore-scripts): nothing from npm runs as root.
+if [[ -d $D$PREFIX/deploy/node_modules ]] && cmp -s "$D$PREFIX/deploy/package-lock.json" "$new/deploy/package-lock.json"; then
+  cp -a "$D$PREFIX/deploy/node_modules" "$new/deploy/node_modules"
+elif command -v npm >/dev/null 2>&1; then
+  echo "installing wrangler (deploy/package-lock.json) for webdata-deploy"
+  npm ci --prefix "$new/deploy" --omit=dev --ignore-scripts --no-audit --no-fund --update-notifier=false --loglevel=error --cache "$STAGE/npm-cache" >/dev/null \
+    || warn "couldn't install wrangler (npm ci in $PREFIX/deploy): publishing pages to Cloudflare won't work until the next install succeeds"
+else
+  warn "npm not found (it comes with Node.js): publishing pages to Cloudflare won't work"
+fi
 if (( ! TEST )); then chown -R root:root "$new"; fi
 chmod -R u=rwX,go=rX "$new"
 chmod 0755 "$new"/bin/*
@@ -600,7 +560,7 @@ OMB_WEBREPORTS_CONFIG=$D$CONFIG PLATFORM_DIR=$D$PREFIX/webroot "$NODE" "$D$PREFI
 # --- DATA_DIR: the owner's; Apache may read only reports/ and data/ -----------------
 mkdir -p "$D$DATA_DIR"
 if (( ! TEST )); then chown "$OWNER:$OWNER" "$D$DATA_DIR"; chmod 0750 "$D$DATA_DIR"; fi
-asowner mkdir -p "$D$DATA_DIR/reports" "$D$DATA_DIR/data" "$D$DATA_DIR/jobs" "$D$DATA_DIR/.state" "$D$DATA_DIR/access"
+asowner mkdir -p "$D$DATA_DIR/reports" "$D$DATA_DIR/data" "$D$DATA_DIR/jobs" "$D$DATA_DIR/.state"
 
 if [[ -n $MIGRATE ]]; then
   echo "migrating content from $MIGRATE (as $OWNER):"
@@ -628,15 +588,14 @@ if (( ! TEST )); then
   # As the owner, never following links: these trees are the owner's (and bots') to fill.
   runuser -u "$OWNER" -- setfacl -R -P -m u:www-data:rX "$DATA_DIR/reports" "$DATA_DIR/data"
   runuser -u "$OWNER" -- setfacl -R -P -d -m u:www-data:rX "$DATA_DIR/reports" "$DATA_DIR/data"
-  # The gate reads the reports' report.json and the access settings, nothing else.
-  setfacl -m "u:$GATE_USER:x" "$DATA_DIR"
-  dir=$(dirname "$DATA_DIR")
+  # webdata-deploy reads the same two (it publishes only the chosen pages and their data).
+  dir=$DATA_DIR
   while [[ $dir != / ]]; do
-    runuser -u "$GATE_USER" -- test -x "$dir" || setfacl -m "u:$GATE_USER:x" "$dir"
+    runuser -u "$DEPLOY_USER" -- test -x "$dir" || setfacl -m "u:$DEPLOY_USER:x" "$dir"
     dir=$(dirname "$dir")
   done
-  runuser -u "$OWNER" -- setfacl -R -P -m "u:$GATE_USER:rX" "$DATA_DIR/reports" "$DATA_DIR/access"
-  runuser -u "$OWNER" -- setfacl -R -P -d -m "u:$GATE_USER:rX" "$DATA_DIR/reports" "$DATA_DIR/access"
+  runuser -u "$OWNER" -- setfacl -R -P -m "u:$DEPLOY_USER:rX" "$DATA_DIR/reports" "$DATA_DIR/data"
+  runuser -u "$OWNER" -- setfacl -R -P -d -m "u:$DEPLOY_USER:rX" "$DATA_DIR/reports" "$DATA_DIR/data"
   if [[ -n $MIGRATE ]]; then
     # The old layout let www-data through the folders above the old checkout.
     dir=$MIGRATE
@@ -660,6 +619,41 @@ if (( ! TEST )); then
   rm -rf /etc/apache2/webdata /run/webdata
   a2dissite -q reports 2>/dev/null || true
   rm -f /etc/apache2/sites-available/reports.conf
+  # Password access (webdata-gate, webdata-access) and the site's own Tailscale
+  # node (webdata-tailscale): gone. Pages for the internet are published to Cloudflare.
+  OLD_NODE=""
+  if [[ -e /etc/systemd/system/webdata-tailscale.service ]]; then
+    ts_sock=/run/omb-webreports-tailscale/tailscaled.sock
+    if [[ -S $ts_sock ]]; then
+      OLD_NODE=$(tailscale --socket="$ts_sock" status --json 2>/dev/null | "$NODE" -e 'try { console.log((JSON.parse(require("fs").readFileSync(0, "utf8")).Self?.DNSName || "").split(".")[0]); } catch {}' || true)
+      tailscale --socket="$ts_sock" logout >/dev/null 2>&1 || true
+    fi
+    systemctl disable --now -q webdata-tailscale.service 2>/dev/null || true
+    rm -f /etc/systemd/system/webdata-tailscale.service
+    rm -rf /var/lib/omb-webreports-tailscale
+    echo "removed the site's own Tailscale node${OLD_NODE:+ ($OLD_NODE)}"
+  fi
+  if [[ -e /etc/systemd/system/webdata-gate.service ]]; then
+    systemctl disable --now -q webdata-gate.service 2>/dev/null || true
+    rm -f /etc/systemd/system/webdata-gate.service
+    rm -rf /var/lib/omb-webreports-gate
+    echo "removed webdata-gate (password access)"
+  fi
+  for u in omb-webreports-gate omb-webreports-tailscale; do
+    id "$u" >/dev/null 2>&1 || continue
+    dir=$DATA_DIR
+    while [[ $dir != / ]]; do setfacl -x "u:$u" "$dir" 2>/dev/null || true; dir=$(dirname "$dir"); done
+    for d in "$DATA_DIR/reports" "$DATA_DIR/access"; do
+      [[ -d $d ]] || continue
+      runuser -u "$OWNER" -- setfacl -R -P -x "u:$u" "$d" 2>/dev/null || true
+      runuser -u "$OWNER" -- setfacl -R -P -d -x "u:$u" "$d" 2>/dev/null || true
+    done
+    userdel "$u" 2>/dev/null || true
+  done
+  rm -f /usr/local/bin/webdata-access
+  if [[ -d $DATA_DIR/access ]] && ! rmdir "$DATA_DIR/access" 2>/dev/null; then
+    warn "$DATA_DIR/access holds password settings from webdata-access, which is gone; delete it"
+  fi
 fi
 
 # --- install the generated system files ---------------------------------------------
@@ -705,31 +699,32 @@ apache2ctl configtest
 
 # --- services ----------------------------------------------------------------------------
 systemctl daemon-reload
-systemctl enable -q apache2 webdata-gate.service webdata-sync.service webdata-jobs.service webdata-notify.service
-systemctl restart apache2 webdata-gate.service webdata-sync.service webdata-jobs.service
-# The site's own Tailscale node, once it has been set up (webdata-admin site login);
-# restarted so it runs the tailscaled that's installed now.
-if [[ -n $SITE_HOSTNAME ]]; then
-  systemctl enable -q webdata-tailscale.service
-  systemctl restart webdata-tailscale.service
+systemctl enable -q apache2 webdata-sync.service webdata-jobs.service webdata-notify.service
+systemctl restart apache2 webdata-sync.service webdata-jobs.service
+# Publishing, once set up (webdata-admin deploy setup): restarted to run the new program.
+if [[ -f $DEPLOY_SECRETS ]]; then
+  systemctl enable -q webdata-deploy.service
+  systemctl restart webdata-deploy.service
 fi
 
-# --- tailscale serve: people go to the gate, never straight to Apache -----------------
-# Older installs pointed tailscale serve (and maybe Funnel) at Apache's tailnet
-# address, which Apache no longer listens on. Repoint those handlers at the gate,
-# keeping Funnel on wherever it was on.
+# --- tailscale serve: your tailnet's HTTPS address for Apache ------------------------
+# Older installs pointed tailscale serve at webdata-gate, or at Apache's tailnet
+# address: point those handlers at Apache. Never with Funnel: the site isn't for
+# the internet (published pages are, on Cloudflare).
 if command -v tailscale >/dev/null 2>&1 && st=$(tailscale serve status --json 2>/dev/null); then
   while IFS=' ' read -r port funnel; do
     [[ -n $port ]] || continue
-    if [[ $funnel == 1 ]]; then tailscale funnel --bg --https="$port" "http://127.0.0.1:$GATE_PORT" >/dev/null
-    else tailscale serve --bg --https="$port" "http://127.0.0.1:$GATE_PORT" >/dev/null; fi
-    echo "tailscale: https port $port now goes to webdata-gate (127.0.0.1:$GATE_PORT)$( [[ $funnel == 1 ]] && echo ', Funnel kept on')"
-  done < <(OLD="${OLD_LISTEN_IP:-127.0.0.1}" PORT="$LISTEN_PORT" "$NODE" -e '
+    tailscale serve --bg --https="$port" "http://127.0.0.1:$LISTEN_PORT" >/dev/null
+    echo "tailscale: https port $port now goes to Apache (127.0.0.1:$LISTEN_PORT), tailnet only$( [[ $funnel == 1 ]] && echo '; Funnel turned off')"
+  done < <(OLD="${OLD_LISTEN_IP:-127.0.0.1}" PORT="$LISTEN_PORT" GATE="$OLD_GATE_PORT" "$NODE" -e '
     const st = JSON.parse(require("fs").readFileSync(0, "utf8") || "{}");
-    const apache = new Set([`http://${process.env.OLD}:${process.env.PORT}`, `http://127.0.0.1:${process.env.PORT}`, `http://localhost:${process.env.PORT}`]);
+    const e = process.env;
+    const old = new Set([`http://${e.OLD}:${e.PORT}`, `http://127.0.0.1:${e.GATE}`, `http://localhost:${e.GATE}`]);
+    const apache = new Set([`http://127.0.0.1:${e.PORT}`, `http://localhost:${e.PORT}`]);
     for (const [host, w] of Object.entries(st.Web || {})) {
       const p = w?.Handlers?.["/"]?.Proxy?.replace(/\/$/, "");
-      if (apache.has(p)) console.log(host.split(":").pop(), st.AllowFunnel?.[host] ? 1 : 0);
+      const funnel = st.AllowFunnel?.[host] ? 1 : 0;
+      if (old.has(p) || (apache.has(p) && funnel)) console.log(host.split(":").pop(), funnel);
     }' <<<"$st")
 fi
 
@@ -785,19 +780,19 @@ echo
 echo "omb-webreports is installed$( (( UNSAFE )) && echo ' (UNSAFE: from a development checkout)')."
 echo "  program  $PREFIX  (from $SRC${commit:+ @ ${commit:0:12}})"
 echo "  content  $DATA_DIR"
-echo "  on       $SITE_URL  (webdata-gate on 127.0.0.1:$GATE_PORT; Apache on 127.0.0.1:$LISTEN_PORT; unset databases are $ACCESS_DEFAULT)"
+echo "  on       $SITE_URL  (tailscale serve → Apache on 127.0.0.1:$LISTEN_PORT)"
 echo "  check    webdata-info; as root: sudo webdata-admin status"
 if [[ -n $MIGRATE ]]; then
   echo "  migrated from $MIGRATE: once the site looks right, delete that folder (its services now run from $PREFIX)"
 fi
-if [[ -n $SITE_HOSTNAME ]]; then
-  echo "  node     the site's own Tailscale node, $SITE_HOSTNAME: sudo webdata-admin site status"
-else
-  if [[ $SITE_URL == https://*.ts.net:* ]] && ! tailscale serve status 2>/dev/null | grep -q "127.0.0.1:$GATE_PORT"; then
-    echo "  HTTPS    not set up yet: tailscale serve --bg --https=${SITE_URL##*:} http://127.0.0.1:$GATE_PORT"
-  fi
-  echo "  address  for https://<name>.<tailnet>.ts.net/ (its own Tailscale node): sudo webdata-admin site login <name>"
+if [[ $SITE_URL == https://*.ts.net:* ]] && ! tailscale serve status 2>/dev/null | grep -q "127.0.0.1:$LISTEN_PORT"; then
+  echo "  HTTPS    not set up yet: sudo tailscale serve --bg --https=${SITE_URL##*:} http://127.0.0.1:$LISTEN_PORT"
 fi
-echo "  internet to open the site to everyone (set passwords first: webdata-access status):"
-echo "           sudo webdata-admin site funnel on"
-
+if [[ -f $DEPLOY_SECRETS ]]; then
+  echo "  internet $(OMB_WEBREPORTS_CONFIG=$CONFIG "$NODE" "$PREFIX/bin/webdata-info" --public || true)  (sudo webdata-admin deploy status)"
+else
+  echo "  internet publish chosen pages to Cloudflare: sudo webdata-admin deploy setup (docs/setup.md, step 12)"
+fi
+if [[ -n ${OLD_NODE:-} ]]; then
+  echo "  removed  the site's own Tailscale node: delete $OLD_NODE at https://login.tailscale.com/admin/machines"
+fi

@@ -11,3 +11,6 @@
 
 # Python bytecode
 __pycache__/
+
+# wrangler for bin/webdata-deploy (npm ci in deploy/; the installer does it for the installed copy)
+/deploy/node_modules/

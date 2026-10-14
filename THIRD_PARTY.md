@@ -49,6 +49,13 @@ THIS SOFTWARE.
   1.33.1-dev65.0, which contains DuckDB v1.5.6), kept equal to OpenMausBot's
   DuckDB by `admin/openmausbot-upgrade.sh`.
 
+## Installed with the program, not bundled
+
+- **wrangler** (MIT OR Apache-2.0), Cloudflare's CLI, and its dependencies:
+  installed by `admin/install.sh` with `npm ci` from `deploy/package-lock.json`
+  (pinned) into `/usr/local/lib/omb-webreports/deploy/node_modules`, for
+  `webdata-deploy`.
+
 ## Used from the host, not bundled
 
 Installed separately (see docs/setup.md), each under its own license:

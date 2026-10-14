@@ -9,7 +9,8 @@ people) making or changing reports. Read it all before writing anything.
 
 | Name | What | You |
 |---|---|---|
-| `SITE` | the URL people open: `https://<name>.<tailnet>.ts.net` or `https://<machine>.<tailnet>.ts.net:8443` | use it for every link |
+| `SITE` | the URL people open on the tailnet: `https://<machine>.<tailnet>.ts.net:8443` | use it for every link |
+| `PUBLIC` | the internet address of the pages a person published (Cloudflare), or `none` | `PUBLIC/reports/<slug>/` only for those pages ("Published pages") |
 | `REPORTS` | your reports: `REPORTS/<slug>/` is served at `SITE/reports/<slug>/` | write here |
 | `JOBS` | scheduled data jobs: `JOBS/<name>/job.json` + `run.py` | write here |
 | `DATA` | published databases (`<name>.duckdb`) and `catalog.json`, served at `SITE/data/` | generated: read |
@@ -21,7 +22,7 @@ files. The shared code and docs (`DOCS`, served `/lib/`, the gallery) are
 owned by root: read them, copy from them, never try to change them.
 
 ```
-SITE/                      (webdata-gate → Apache; tailnet only, or the internet with Funnel)
+SITE/                      (tailscale serve → Apache; your tailnet only)
 ├── /                      front page: lists reports and databases
 ├── /lib/                  shared runtime: kit.js, kit.css, report-errors.js, vendor/ (d3 7.9.0, Plot 0.6.17)
 ├── /reports/_gallery/     the design gallery (DOCS/webroot/reports/_gallery/)
@@ -45,8 +46,8 @@ DOCS/                      read-only
 │   ├── webdata-errors     JavaScript errors reported by real browsers/phones (lib/report-errors.js)
 │   ├── webdata-job        scheduled data jobs: new / run / list / logs / enable / notify-test
 │   ├── webdata-notify     failure alerts (a root service): status
-│   ├── webdata-admin      for people, with sudo: status / update / pair / skills / site (bots can't run it)
-│   ├── webdata-access     who can see each database and its reports: status / set / public / private
+│   ├── webdata-admin      for people, with sudo: status / update / pair / skills / deploy (bots can't run it)
+│   ├── webdata-deploy     pages published to the internet: status (a person publishes them)
 │   ├── webdata-browse     headless Chrome for job scripts: render a page, return HTML/text/JS result
 │   ├── webdata-sync       snapshots, catalog, report index (runs as a service)
 │   └── webdata-bake       bakes each report's first render (run by webdata-sync)
@@ -82,7 +83,7 @@ DOCS/                      read-only
    re-attach → `render()` runs again. A changed report `index.html` reloads the page.
 
 So: **when a bot's data changes, every open report updates itself within ~20s.**
-Nothing to deploy.
+Nothing to deploy: published pages follow on their own within a minute or two.
 
 Schemas: `main` holds the bot's own tables, which are the ones to use. `omb_results`
 holds the bot's cached sheet-card query results (`c_1`, `c_2`, …); avoid them.
@@ -139,13 +140,14 @@ A report directory:
 
 `title` is required; `short_name` is the home-screen label (≤ ~12 chars);
 `databases` must name files in `DATA/` (without `.duckdb`), and **every**
-database the page reads: the first-render bake and who may see the report
-(password access, "Gotchas") both go by this list.
+database the page reads: the first-render bake and publishing (a published
+page takes exactly the databases a person approved; "Published pages") both go
+by this list.
 
 After creating or changing a report, run **`webdata-check <slug>`**.
 It runs a sync pass (warnings for a bad `report.json`, unknown database, …),
 renders the report at iPhone size in light and dark mode (straight from Apache
-on this machine, so private reports render too), prints
+on this machine), prints
 kit errors, page errors and horizontal overflow, saves `light.png` / `dark.png`,
 and exits 1 on any problem. Then look at both screenshots.
 
@@ -286,9 +288,8 @@ Logs: `journalctl -u webdata-sync -f`. Optional `sync.json` in the folder that h
 (delete an already-published `DATA/<name>.duckdb` by hand). `bake`
 turns baked first renders on or off; `bake_max_kb` skips reports whose first
 render returns more than that.
-Everything served is readable by everyone who can reach the site (the tailnet,
-or the internet when Funnel is on), except private databases and the reports
-that read them, which need their password ("Gotchas").
+Everything served is readable by everyone on your tailnet. Pages a person
+published, and their databases, are also on the internet ("Published pages").
 
 Generated files (`data/*`, `reports/index.json`, report manifests, PNG icons and `initial.json`)
 are rewritten only when their content changes. Don't edit them by hand.
@@ -311,16 +312,18 @@ are rewritten only when their content changes. Don't edit them by hand.
   reach the site to load. (Over the HTTPS URL a report *could* register one; don't
   without asking, since it would fight the ETag freshness model.)
 - The HTTPS address is Tailscale config, not Apache: the machine's
-  `tailscale serve` (to webdata-gate, `127.0.0.1:8081`) or the site's own
-  Tailscale node (to the gate's socket). Funnel, if on, opens it to the
-  internet: `webdata-access status` lists the addresses and says which.
-- **Who can see what.** Access belongs to a database: `webdata-access set
-  <db>` (password on stdin) makes its file, its other files and every report
-  whose `report.json` lists it private; `public`, `private`, `default` change
-  it back. People then sign in once per device. The tools here (`webdata-check`,
-  `webdata-sql`, the bake) use Apache directly and see everything. Never write
-  a password into a file, note or reply; only its hash is kept. The
-  report-create and report-update skills say when to ask.
+  `tailscale serve` (to Apache, `127.0.0.1:8080`), tailnet only.
+- **Published pages.** A person can put a page on the internet with `sudo
+  webdata-admin deploy add <slug>` (bots can't): a static copy on Cloudflare,
+  at `PUBLIC/reports/<slug>/`, with the databases its `report.json` listed at
+  that moment. `webdata-deploy status` lists them. Changes to a published page
+  and its data go out on their own within a minute or two, so **anything you
+  write in a published page is public**: no private notes, names or data that
+  shouldn't be. If a published page starts reading another database, the
+  internet keeps its last published version until a person approves the change
+  (`webdata-deploy status` says so). There may be one password for the whole
+  published site; you never have it. Never publish or unpublish yourself, and
+  don't link `PUBLIC` addresses for pages that aren't published.
 - omb-webreports itself (DOCS, `/lib/`, the gallery, the tools) is installed and
   updated by a person, as root, from its repository (`sudo webdata-admin update`); bots
   can't change it.

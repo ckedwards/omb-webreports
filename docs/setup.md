@@ -369,8 +369,9 @@ sudo webdata-admin deploy setup      # asks for the account ID, a name for the W
 The Worker's name becomes the address: `https://<name>.<subdomain>.workers.dev/`.
 The token is checked with Cloudflare, then kept in
 `/etc/omb-webreports/deploy-secrets.json` (root only; the service gets it as a
-systemd credential). The first deploy, a minute later, puts up the front page
-only.
+systemd credential). It then deploys and waits for the result: the front page
+only, until you add pages. `add`, `remove` and `password` also deploy right away
+and print the result (or Cloudflare's error).
 
 **Each page you want public:**
 

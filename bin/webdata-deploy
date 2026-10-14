@@ -187,6 +187,8 @@ async function daemon() {
       const forced = force;
       force = false;
       lastTry = now;
+      state.attempt_started = new Date().toISOString();
+      save();
       const r = await deploy(conf, secrets, { unless: forced ? null : state.hash });
       state.last_attempt = new Date().toISOString();
       if (r.staged) state.notes = r.staged.notes;

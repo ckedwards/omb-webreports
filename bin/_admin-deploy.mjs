@@ -92,6 +92,52 @@ function pageDatabases(slug) {
 }
 
 const addressOf = () => readJSON(DEPLOY_STATE, {})?.url || null;
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+const active = () => spawnSync('systemctl', ['is-active', '--quiet', UNIT]).status === 0;
+
+/**
+ * Deploy now and say how it went, so a change (or a bad token) shows here and
+ * not only in `deploy status`. The service deploys on SIGHUP; state.json says
+ * when its last attempt was and how it ended.
+ */
+async function deployAndReport() {
+  if (!ROOT_USER) { console.log('  (not root: not deploying)'); return true; }
+  if (!loadConfig().account_id || !fs.existsSync(DEPLOY_SECRETS)) return true;
+  for (let i = 0; i < 20 && !active(); i++) await sleep(500);
+  if (!active()) { console.log(`${UNIT} isn't running: journalctl -u ${UNIT} -n 50`); return false; }
+  await sleep(1500); // a service just (re)started: let it get to its signal handler
+  // An attempt that started after we asked, and has finished.
+  const asked = new Date().toISOString();
+  const done = (st) => (st.attempt_started || '') >= asked && (st.last_attempt || '') >= st.attempt_started;
+  spawnSync('systemctl', ['kill', '-s', 'HUP', '--kill-whom=main', UNIT]);
+  process.stdout.write('deploying');
+  const until = Date.now() + 5 * 60_000;
+  let st = {};
+  while (Date.now() < until) {
+    await sleep(2000);
+    process.stdout.write('.');
+    st = readJSON(DEPLOY_STATE, {}) || {};
+    if (done(st)) break;
+  }
+  console.log();
+  if (!done(st)) {
+    console.log('still deploying after 5 minutes: sudo webdata-admin deploy status');
+    return false;
+  }
+  if (st.error && st.error_at === st.last_attempt) {
+    console.log(`DEPLOY FAILED: ${st.error}`);
+    if (/No access|Authentication error|\b403\b|10000|Unauthorized/i.test(st.error)) {
+      console.log('The API token can\'t deploy Workers in this account. Create one from the "Edit Cloudflare Workers" template');
+      console.log('(Account Resources: Include → this account; it must list "Workers Scripts: Edit"), then: sudo webdata-admin deploy setup');
+    } else {
+      console.log('It retries on its own. Details: journalctl -u webdata-deploy -n 50');
+    }
+    return false;
+  }
+  console.log(`deployed: ${st.url ? `${st.url}/` : '(address unknown)'}${st.files ? ` (${st.files} files)` : ''}`);
+  for (const n of st.notes || []) console.log(`  note: ${n}`);
+  return true;
+}
 
 // ---------------------------------------------------------------- commands
 
@@ -133,12 +179,14 @@ async function setup(args) {
   }
   restart();
   const url = subdomain ? `https://${worker}.${subdomain}.workers.dev/` : `https://${worker}.<subdomain>.workers.dev/`;
-  console.log(`\nThe site goes to ${url} in a minute: the front page only, until you add pages:`);
+  console.log(`\nThe site goes to ${url}${Object.keys(conf.pages).length ? '' : ': the front page only, until you add pages'}.`);
+  const ok = await deployAndReport();
   console.log('  sudo webdata-admin deploy add <slug>      (webdata-ls lists them)');
   console.log('  sudo webdata-admin deploy status');
+  if (!ok) process.exit(1);
 }
 
-function add(slugs) {
+async function add(slugs) {
   if (!slugs.length) die('sudo webdata-admin deploy add <slug>...');
   const raw = readJSON(DEPLOY_CONFIG, {}) || {};
   const conf = loadConfig();
@@ -153,23 +201,26 @@ function add(slugs) {
   saveConfig(raw);
   const url = addressOf();
   console.log(conf.password ? 'Behind the site password.' : 'Anyone with the link can open it.');
-  if (url) for (const slug of slugs) console.log(`  ${url}/reports/${slug}/   (within a minute or two)`);
-  if (!conf.account_id) console.log('Deploying isn\'t set up yet: sudo webdata-admin deploy setup');
+  if (!conf.account_id) { console.log('Deploying isn\'t set up yet: sudo webdata-admin deploy setup'); return; }
+  if (!(await deployAndReport())) process.exit(1);
+  const live = addressOf() || url;
+  if (live) for (const slug of slugs) console.log(`  ${live}/reports/${slug}/`);
 }
 
-function remove(slugs) {
+async function remove(slugs) {
   if (!slugs.length) die('sudo webdata-admin deploy remove <slug>...');
   const raw = readJSON(DEPLOY_CONFIG, {}) || {};
   raw.pages = raw.pages || {};
   for (const slug of slugs) {
     if (!raw.pages[slug]) { console.log(`${slug} isn't published`); continue; }
     delete raw.pages[slug];
-    console.log(`removed ${slug}: it leaves the internet with the next deploy (a minute or two)`);
+    console.log(`removed ${slug}`);
   }
   saveConfig(raw);
+  if (!(await deployAndReport())) process.exit(1);
 }
 
-function password(args) {
+async function password(args) {
   const raw = readJSON(DEPLOY_CONFIG, {}) || {};
   const secrets = loadSecrets();
   if (args[0] === 'set') {
@@ -180,14 +231,16 @@ function password(args) {
     saveConfig({ ...raw, password: true });
     restart();
     console.log('The published site asks for this password once per device (and once inside each home-screen app).');
-    console.log('A new password signs every device out. It goes out with the next deploy (a minute or two).');
+    console.log('A new password signs every device out.');
+    if (!(await deployAndReport())) process.exit(1);
   } else if (args[0] === 'off') {
     delete secrets.password;
     saveSecrets(secrets);
     saveConfig({ ...raw, password: false });
     restart();
-    console.log('The published site is open to anyone with the link again, from the next deploy.');
+    console.log('The published site is open to anyone with the link again.');
     console.log('(The old password stays on Cloudflare as an unused secret: Workers & Pages → the Worker → Settings.)');
+    if (!(await deployAndReport())) process.exit(1);
   } else {
     die('sudo webdata-admin deploy password set|off');
   }
@@ -198,11 +251,11 @@ function password(args) {
 const [cmd, ...args] = process.argv.slice(2);
 switch (cmd) {
   case 'setup': await setup(args); break;
-  case 'add': add(args); break;
-  case 'remove': remove(args); break;
-  case 'password': password(args); break;
+  case 'add': await add(args); break;
+  case 'remove': await remove(args); break;
+  case 'password': await password(args); break;
   case 'now':
-    if (systemctl('kill', '-s', 'HUP', '--kill-whom=main', UNIT)) console.log('deploying now: sudo webdata-admin deploy status');
+    if (!(await deployAndReport())) process.exit(1);
     break;
   case 'disable':
     systemctl('disable', '--now', UNIT);

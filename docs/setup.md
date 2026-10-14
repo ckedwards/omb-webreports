@@ -351,11 +351,14 @@ update a published page but never publish another.
 **Once: a Cloudflare account and a token.**
 
 1. Sign up at https://dash.cloudflare.com/sign-up (the free plan is enough).
-2. Open **Workers & Pages** once: Cloudflare asks you to choose your
-   `workers.dev` subdomain (e.g. `you` → `https://<name>.you.workers.dev`).
-   The **Account ID** is on that page too (Account details).
-3. **My Profile → API Tokens → Create Token**, template **Edit Cloudflare
-   Workers**. Under Account Resources choose your account; under Zone
+2. Open **Compute → Workers & Pages**. **Account details** (on the right) shows
+   the **Account ID** (also in the address bar: `dash.cloudflare.com/<id>/…`)
+   and your `workers.dev` **Subdomain**, which Cloudflare assigns (e.g.
+   `you.workers.dev` → `https://<name>.you.workers.dev`; the pencil changes it).
+   If there's no subdomain yet, it asks you to pick one there.
+3. **Profile → API Tokens** (the person icon at the top right, or
+   https://dash.cloudflare.com/profile/api-tokens) → **Create Token**, template
+   **Edit Cloudflare Workers**. Under Account Resources choose your account; under Zone
    Resources, *All zones from an account* is fine (it's only used for custom
    domains). Create it and copy it (Cloudflare shows it once).
 

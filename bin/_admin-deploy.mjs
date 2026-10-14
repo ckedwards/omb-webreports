@@ -99,14 +99,14 @@ async function setup(args) {
   const raw = readJSON(DEPLOY_CONFIG, {}) || {};
   const conf = loadConfig();
   const secrets = loadSecrets();
-  let account = flag(args, '--account') ?? ask('Cloudflare account ID (Workers & Pages → Account details)', conf.account_id || '');
+  let account = flag(args, '--account') ?? ask('Cloudflare account ID (Workers & Pages → Account details, or the address bar: dash.cloudflare.com/<id>/…)', conf.account_id || '');
   let worker = flag(args, '--worker') ?? ask('Worker name (the address becomes https://<name>.<your subdomain>.workers.dev)', conf.worker || 'omb-webreports');
   account = (account || '').trim().toLowerCase();
   worker = (worker || '').trim().toLowerCase();
   if (!/^[0-9a-f]{32}$/.test(account)) die('the account ID is 32 hexadecimal characters (dashboard: Workers & Pages → Account details)');
   if (!WORKER.test(worker)) die(`"${worker}" can't be a Worker name: lowercase letters, digits and -, at most 63`);
 
-  console.log('An API token from "Edit Cloudflare Workers" (My Profile → API Tokens → Create Token), for this account only.');
+  console.log('An API token from the "Edit Cloudflare Workers" template (https://dash.cloudflare.com/profile/api-tokens → Create Token).');
   let token = secret(secrets.token ? 'API token (Enter keeps the current one): ' : 'API token: ');
   if (!token) token = secrets.token || '';
   if (!/^[A-Za-z0-9_-]{20,200}$/.test(token)) die('that doesn\'t look like a Cloudflare API token');

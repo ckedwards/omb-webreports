@@ -281,7 +281,10 @@ package's install script runs).
   pages, their databases (`DATA/<db>.*`, `DATA/<db>/…`), and the report index
   and data catalog cut down to those, plus `nosniff`, `X-Frame-Options`,
   `Referrer-Policy` and `X-Robots-Tag: noindex` headers. Each deploy replaces
-  the whole copy at once.
+  the whole copy at once. A page's `initial.json` records its databases'
+  versions as Apache's ETags; the copy gets Cloudflare's instead (wrangler's
+  asset hash), so a first visit there renders without DuckDB-WASM too, and
+  each database gets a `Last-Modified` header (for "Data updated … ago").
 - **The site password** (optional, one for the whole published site): then
   the Worker (`deploy/worker.js`) runs before every request. The password is
   the Worker's secret on Cloudflare (and root-only in `deploy-secrets.json`).

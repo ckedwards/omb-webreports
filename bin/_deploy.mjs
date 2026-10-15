@@ -18,9 +18,10 @@
 
 import crypto from 'node:crypto';
 import fs from 'node:fs';
+import { createRequire } from 'node:module';
 import path from 'node:path';
 
-import { CONFIG_FILE, PLATFORM_DIR, REPORTS_DIR, PUBLISHED_DIR } from './_config.mjs';
+import { CONFIG_FILE, PLATFORM_DIR, REPORTS_DIR, PUBLISHED_DIR, ROOT } from './_config.mjs';
 
 const ETC = path.dirname(CONFIG_FILE);
 /** Root-owned, readable by all: account, Worker name, password on/off, the published pages. */
@@ -86,7 +87,10 @@ export function readInside(root, file) {
     const real = fdPath(fd);
     if (!real || !real.startsWith(root + path.sep)) return null;
     if (st.size > MAX_FILE_BYTES) return { tooBig: st.size };
-    return { data: fs.readFileSync(fd) };
+    const big = fs.fstatSync(fd, { bigint: true });
+    // Apache's ETag for it (FileETag MTime Size: hex size, hex mtime in µs).
+    const apacheTag = `"${big.size.toString(16)}-${(big.mtimeNs / 1000n).toString(16)}"`;
+    return { data: fs.readFileSync(fd), apacheTag, mtime: st.mtime };
   } finally { fs.closeSync(fd); }
 }
 
@@ -193,6 +197,43 @@ const HEADERS = `# Written by webdata-deploy. Browsers revalidate everything by 
 `;
 
 /**
+ * The ETag Cloudflare serves a static asset with: wrangler's asset hash
+ * (blake3 of the base64 contents plus the extension, 32 hex digits), from the
+ * wrangler install's own blake3-wasm. Null if that isn't installed.
+ */
+let blake3;
+function cloudflareTag(to, data) {
+  if (blake3 === undefined) {
+    try { blake3 = createRequire(path.join(ROOT, 'deploy', 'package.json'))('blake3-wasm'); } catch { blake3 = null; }
+  }
+  if (!blake3) return null;
+  return `"${blake3.hash(data.toString('base64') + path.extname(to).slice(1)).toString('hex').slice(0, 32)}"`;
+}
+
+/**
+ * A page's initial.json (webdata-bake's first render) is used only for the
+ * database versions it was made from, which it records as Apache's ETags.
+ * Cloudflare's differ, so without this every first visit there starts
+ * DuckDB-WASM and downloads the databases. Each tag that is the staged file's
+ * becomes Cloudflare's; one that isn't (a bake of older data) stays, and the
+ * kit redraws from the engine as it does on the tailnet.
+ */
+function retagBake(text, tags) {
+  let bake;
+  try { bake = JSON.parse(text); } catch { return null; }
+  if (bake?.format !== 1 || typeof bake.versions !== 'string' || !bake.versions) return null;
+  let changed = false;
+  const versions = bake.versions.split(',').map((v) => {
+    const i = v.indexOf('=');
+    const t = tags.get(v.slice(0, i));
+    if (i < 0 || !t || t.apache !== v.slice(i + 1)) return v;
+    changed = true;
+    return `${v.slice(0, i)}=${t.cloudflare}`;
+  }).join(',');
+  return changed ? JSON.stringify({ ...bake, versions }) : null;
+}
+
+/**
  * Write the copy to deploy into `site` (which must not exist yet). Returns
  * { files, bytes, hash, pages, databases, notes }. The hash covers every file's
  * path and contents, so the service can tell "nothing changed" from a new deploy.
@@ -202,11 +243,25 @@ export function stage(conf, site) {
   const notes = [...p.notes];
   fs.mkdirSync(site, { recursive: true, mode: 0o700 });
   const files = new Map();
+  const tags = new Map(); // database -> { apache, cloudflare }: its staged .duckdb's ETags
+  let headers = HEADERS;
   for (const s of p.sources) {
     const r = readInside(s.root, s.from);
     if (!r) { notes.push(`${s.to}: skipped (not a plain file, or it moved)`); continue; }
     if (r.tooBig) { notes.push(`${s.to}: skipped, ${(r.tooBig / 1048576).toFixed(1)} MB (Cloudflare's limit is 25 MB a file)`); continue; }
     files.set(s.to, r.data);
+    const db = /^data\/([^/]+)\.duckdb$/.exec(s.to)?.[1];
+    if (db) {
+      const cloudflare = cloudflareTag(s.to, r.data);
+      if (cloudflare) tags.set(db, { apache: r.apacheTag, cloudflare });
+      // The kit shows "Data updated … ago" from it; Cloudflare doesn't send one.
+      headers += `/${s.to}\n  Last-Modified: ${r.mtime.toUTCString()}\n`;
+    }
+  }
+  for (const slug of p.pages) {
+    const to = `reports/${slug}/initial.json`;
+    const text = files.has(to) && retagBake(files.get(to).toString('utf8'), tags);
+    if (text) files.set(to, Buffer.from(text));
   }
 
   // The front page's lists, cut down to what's published.
@@ -218,7 +273,7 @@ export function stage(conf, site) {
   const catalog = p.dataRoot && readJSON0(readInside(p.dataRoot, path.join(p.dataRoot, 'catalog.json')));
   const databases = (Array.isArray(catalog?.databases) ? catalog.databases : []).filter((d) => dbs.has(d?.name));
   files.set('data/catalog.json', Buffer.from(JSON.stringify({ ...catalog, databases }, null, 2) + '\n'));
-  files.set('_headers', Buffer.from(HEADERS));
+  files.set('_headers', Buffer.from(headers));
 
   if (files.size > MAX_FILES) throw new Error(`${files.size} files: Cloudflare's limit is ${MAX_FILES}`);
   const hash = crypto.createHash('sha256');
